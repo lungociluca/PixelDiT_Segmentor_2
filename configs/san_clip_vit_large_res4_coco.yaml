@@ -1,7 +1,8 @@
 _BASE_: san_clip_vit_res4_coco.yaml
 MODEL:
   SAN:
-    CLIP_RESOLUTION: 0.7
+    CLIP_RESOLUTION: 1.0
+    ASYMETRIC_INPUT: False   # otherwise the backbone branch gets a 512×512 copy
     CLIP_MODEL_NAME: "ViT-L-14-336"
     FEATURE_LAST_LAYER_IDX: 18
   SIDE_ADAPTER:

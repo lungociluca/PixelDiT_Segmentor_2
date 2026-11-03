@@ -108,55 +108,23 @@ class Trainer(DefaultTrainer):
 
     @classmethod
     def build_optimizer(cls, cfg, model):
-        weight_decay_norm = cfg.SOLVER.WEIGHT_DECAY_NORM
-        weight_decay_embed_group = cfg.SOLVER.WEIGHT_DECAY_EMBED_GROUP
-        weight_decay_embed = cfg.SOLVER.WEIGHT_DECAY_EMBED
+        token_params = [
+            param
+            for name, param in model.named_parameters()
+            if "learnable_token" in name and param.requires_grad
+        ]
 
-        defaults = {}
-        defaults["lr"] = cfg.SOLVER.BASE_LR
-        defaults["weight_decay"] = cfg.SOLVER.WEIGHT_DECAY
+        # assert len(token_params) > 0, \
+        #     "No trainable learnable_token parameter found."
 
-        norm_module_types = (
-            torch.nn.BatchNorm1d,
-            torch.nn.BatchNorm2d,
-            torch.nn.BatchNorm3d,
-            torch.nn.SyncBatchNorm,
-            # NaiveSyncBatchNorm inherits from BatchNorm2d
-            torch.nn.GroupNorm,
-            torch.nn.InstanceNorm1d,
-            torch.nn.InstanceNorm2d,
-            torch.nn.InstanceNorm3d,
-            torch.nn.LayerNorm,
-            torch.nn.LocalResponseNorm,
+        # TODO
+        optimizer = torch.optim.AdamW(
+            token_params,
+            lr=cfg.SOLVER.BASE_LR,
+            weight_decay=cfg.SOLVER.WEIGHT_DECAY,
         )
 
-        params: List[Dict[str, Any]] = []
-        memo: Set[torch.nn.parameter.Parameter] = set()
-        for module_name, module in model.named_modules():
-            for module_param_name, value in module.named_parameters(recurse=False):
-                if not value.requires_grad:
-                    continue
-                # Avoid duplicating parameters
-                if value in memo:
-                    continue
-                memo.add(value)
-
-                hyperparams = copy.copy(defaults)
-                hyperparams["param_name"] = ".".join([module_name, module_param_name])
-                if "side_adapter_network" in module_name:
-                    hyperparams["lr"] = (
-                        hyperparams["lr"] * cfg.SOLVER.BACKBONE_MULTIPLIER
-                    )
-                # scale clip lr
-                if "clip" in module_name:
-                    hyperparams["lr"] = hyperparams["lr"] * cfg.SOLVER.CLIP_MULTIPLIER
-                if any([x in module_param_name for x in weight_decay_embed_group]):
-                    hyperparams["weight_decay"] = weight_decay_embed
-                if isinstance(module, norm_module_types):
-                    hyperparams["weight_decay"] = weight_decay_norm
-                if isinstance(module, torch.nn.Embedding):
-                    hyperparams["weight_decay"] = weight_decay_embed
-                params.append({"params": [value], **hyperparams})
+        return optimizer
 
         def maybe_add_full_model_gradient_clipping(optim):
             # detectron2 doesn't have full model gradient clipping now

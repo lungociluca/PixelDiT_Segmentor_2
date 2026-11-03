@@ -1,5 +1,8 @@
 _BASE_: Base-coco-stuff-164K-171.yaml
 MODEL:
   META_ARCHITECTURE: "SAN"
+  SAN:
+    CLIP_RESOLUTION: 1.0
+    ASYMETRIC_INPUT: False   # otherwise the backbone branch gets a 512×512 copy
 SOLVER:
   BACKBONE_MULTIPLIER: 1.0

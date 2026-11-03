@@ -1,16 +1,16 @@
 DATASETS:
   TRAIN: ("coco_2017_train_stuff_sem_seg",)
-  TEST: ('coco_2017_test_stuff_sem_seg', 'voc_sem_seg_val','pcontext_sem_seg_val','ade20k_sem_seg_val','pcontext_full_sem_seg_val','ade20k_full_sem_seg_val')
+  TEST: ('coco_2017_test_stuff_sem_seg',) # ('coco_2017_test_stuff_sem_seg', 'voc_sem_seg_val','pcontext_sem_seg_val','ade20k_sem_seg_val','pcontext_full_sem_seg_val','ade20k_full_sem_seg_val')
 SOLVER:
-  IMS_PER_BATCH: 32
+  IMS_PER_BATCH: 1
   BASE_LR: 0.0001
-  MAX_ITER: 60000
+  MAX_ITER: 3
   WARMUP_FACTOR: 1.0
   WARMUP_ITERS: 0
   WEIGHT_DECAY: 0.0001
   OPTIMIZER: "ADAMW"
   LR_SCHEDULER_NAME: "WarmupPolyLR"
-  BACKBONE_MULTIPLIER: 0.1
+  BACKBONE_MULTIPLIER: 1.0
   CLIP_GRADIENTS:
     ENABLED: True
     CLIP_TYPE: "full_model"
@@ -19,26 +19,26 @@ SOLVER:
   AMP:
     ENABLED: True
 INPUT:
-  MIN_SIZE_TRAIN: !!python/object/apply:eval ["[int(x * 0.1 * 640) for x in range(5, 16)]"]
+  MIN_SIZE_TRAIN: !!python/object/apply:eval ["[int(x * 0.1 * 1024) for x in range(10, 16)]"]
   MIN_SIZE_TRAIN_SAMPLING: "choice"
-  MIN_SIZE_TEST: 640
-  MAX_SIZE_TRAIN: 2560
-  MAX_SIZE_TEST: 2560
+  MIN_SIZE_TEST: 1024
+  MAX_SIZE_TRAIN: 4096
+  MAX_SIZE_TEST: 4096
   CROP:
     ENABLED: True
     TYPE: "absolute"
-    SIZE: (640, 640)
+    SIZE: (1024, 1024)
     SINGLE_CATEGORY_MAX_AREA: 1.0
-  COLOR_AUG_SSD: True
-  SIZE_DIVISIBILITY: 640 # used in dataset mapper
+  COLOR_AUG_SSD: False # TODO, maybe allow small jitters
+  SIZE_DIVISIBILITY: 1024 # used in dataset mapper
   FORMAT: "RGB"
   DATASET_MAPPER_NAME: "mask_former_semantic"
 TEST:
-  EVAL_PERIOD: 5000
+  EVAL_PERIOD: 5
   AUG:
     ENABLED: False
-    MIN_SIZES: [320, 480, 640, 800, 960, 1120]
-    MAX_SIZE: 4480
+    MIN_SIZES: [1024, 1280, 1536]
+    MAX_SIZE: 6144
     FLIP: True
 DATALOADER:
   FILTER_EMPTY_ANNOTATIONS: True

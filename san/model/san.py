@@ -9,17 +9,127 @@ from detectron2.structures import ImageList
 from detectron2.utils.memory import retry_if_cuda_oom
 from torch import nn
 from torch.nn import functional as F
+from dataclasses import dataclass, field
+from typing import Optional
+import pyrallis
+from argparse import Namespace
+import json
 
-from .clip_utils import (
-    FeatureExtractor,
-    LearnableBgOvClassifier,
-    PredefinedOvClassifier,
-    RecWithAttnbiasHead,
-    get_predefined_templates,
-)
 from .criterion import SetCriterion
 from .matcher import HungarianMatcher
 from .side_adapter import build_side_adapter_network
+
+
+from t2i.diffusion.model.builder import build_model, get_tokenizer_and_text_encoder
+from t2i.diffusion.model.utils import get_weight_dtype
+from t2i.diffusion.utils.config import PixDiTConfig, model_init_config
+from t2i.diffusion.utils.logger import get_root_logger
+
+from t2i.diffusion.model.flow_dpm import DPMS
+from t2i.diffusion.model.trainer import PixDiTTrainer
+import t2i.pixdit_core.compute_masks as compute_masks_utils
+
+import t2i.config as local_config
+
+@dataclass
+class PixelDiTInference(PixDiTConfig):
+    config: Optional[str] = "diffusion_configs/PixelDiT_1024px_pixel_diffusion_stage3.yaml"
+    model_path: Optional[str] = ".."
+    work_dir: Optional[str] = None
+    version: str = "sigma"
+    txt_file: str = "asset/samples/samples_mini.txt"
+    json_file: Optional[str] = None
+    sample_nums: int = 1
+    bs: int = 1
+    cfg_scale: float = 3.5
+    sampling_algo: str = "flow_dpm-solver"
+    seed: int = 0
+    dataset: str = "custom"
+    step: int = -1
+    add_label: str = ""
+    tar_and_del: bool = False
+    exist_time_prefix: str = ""
+    gpu_id: int = 0
+    custom_image_size: Optional[int] = None
+    custom_height: Optional[int] = None
+    custom_width: Optional[int] = None
+    start_index: int = 0
+    end_index: int = 30_000
+    interval_guidance: List[float] = field(default_factory=lambda: [0, 1])
+    ablation_selections: Optional[List[float]] = None
+    ablation_key: Optional[str] = None
+    if_save_dirname: bool = False
+    negative_prompt: str = ""  # optional negative prompt applied at inference
+
+def set_env(seed=0, latent_size=256):
+    torch.manual_seed(seed)
+    # torch.set_grad_enabled(False)
+    for _ in range(30):
+        torch.randn(1, 4, latent_size, latent_size)
+
+def get_model():
+    args = Namespace(config='diffusion_configs/PixelDiT_1024px_pixel_diffusion_stage3.yaml')
+    config = args = pyrallis.parse(config_class=PixelDiTInference, config_path=args.config, args=[])
+    from t2i.tools.download import resolve_checkpoint
+    args.model_path = resolve_checkpoint("t2i/pixeldit_t2i_v1.pth")
+
+    args.image_size = local_config.image_size
+    if args.custom_image_size:
+        args.image_size = args.custom_image_size
+        print(f"custom_image_size: {args.image_size}")
+
+    set_env(args.seed, args.image_size)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    logger = get_root_logger()
+
+    # only support fixed latent size currently
+    latent_size = args.image_size
+    max_sequence_length = config.text_encoder.model_max_length
+    flow_shift = config.scheduler.flow_shift
+    guidance_type = "classifier-free"
+    assert (
+        isinstance(args.interval_guidance, list)
+        and len(args.interval_guidance) == 2
+        and args.interval_guidance[0] <= args.interval_guidance[1]
+    )
+    args.interval_guidance = [max(0, args.interval_guidance[0]), min(1, args.interval_guidance[1])]
+    default_sample_steps = 50
+    sample_steps = args.step if args.step != -1 else default_sample_steps
+
+    weight_dtype = get_weight_dtype(config.model.mixed_precision)
+    logger.info(f"Inference with {weight_dtype}, guidance_type: {guidance_type}, flow_shift: {flow_shift}")
+
+    tokenizer, text_encoder = get_tokenizer_and_text_encoder(name=config.text_encoder.text_encoder_name, device=device)
+    for param in text_encoder.parameters():
+        param.requires_grad = False
+
+    null_caption_token = tokenizer(
+        args.negative_prompt if hasattr(args, "negative_prompt") and len(args.negative_prompt) > 0 else "",
+        max_length=max_sequence_length,
+        padding="max_length",
+        truncation=True,
+        return_tensors="pt",
+    ).to(device)
+    null_caption_embs = text_encoder(null_caption_token.input_ids, null_caption_token.attention_mask, use_cache=False)[0]
+
+    # model setting
+    model_kwargs = model_init_config(config, latent_size=latent_size)
+    model = build_model(
+        config.model.model, use_fp32_attention=config.model.get("fp32_attention", False), **model_kwargs
+    )
+    for name, param in model.named_parameters():
+        param.requires_grad = ("learnable_token" in name) and local_config.save_learned_tokens
+        
+    model = model.to(device)
+    logger.info(
+        f"{model.__class__.__name__}:{config.model.model}, Model Parameters: {sum(p.numel() for p in model.parameters()):,}"
+    )
+    state_dict = torch.load("t2i/pixeldit_t2i_v1.pth", map_location=lambda storage, loc: storage)
+    if "pos_embed" in state_dict["state_dict"]:
+        del state_dict["state_dict"]["pos_embed"]
+
+    missing, unexpected = model.load_state_dict(state_dict["state_dict"], strict=False)
+    return model.eval().to(torch.bfloat16), tokenizer, text_encoder.eval()
 
 
 @META_ARCH_REGISTRY.register()
@@ -28,33 +138,38 @@ class SAN(nn.Module):
     def __init__(
         self,
         *,
-        clip_visual_extractor: nn.Module,
-        clip_rec_head: nn.Module,
-        side_adapter_network: nn.Module,
-        ov_classifier: PredefinedOvClassifier,
         criterion: SetCriterion,
-        size_divisibility: int,
-        asymetric_input: bool = True,
-        clip_resolution: float = 0.5,
-        pixel_mean: List[float] = [0.48145466, 0.4578275, 0.40821073],
-        pixel_std: List[float] = [0.26862954, 0.26130258, 0.27577711],
         sem_seg_postprocess_before_inference: bool = False,
     ):
         super().__init__()
-        self.asymetric_input = asymetric_input
-        self.clip_resolution = clip_resolution
+        self.size_divisibility = 16
         self.sem_seg_postprocess_before_inference = sem_seg_postprocess_before_inference
-        self.size_divisibility = size_divisibility
         self.criterion = criterion
 
-        self.side_adapter_network = side_adapter_network
-        self.clip_visual_extractor = clip_visual_extractor
-        self.clip_rec_head = clip_rec_head
-        self.ov_classifier = ov_classifier
-        self.register_buffer(
-            "pixel_mean", torch.Tensor(pixel_mean).view(-1, 1, 1), False
-        )
-        self.register_buffer("pixel_std", torch.Tensor(pixel_std).view(-1, 1, 1), False)
+        self.model, self.tokenizer, self.text_encoder = get_model()
+        with open(local_config.ds_config_path) as f:
+            self.labels = json.load(f)
+        self.clean_labels = [x for x in self.labels if x != "unknown"]
+        
+        self.emb, self.emb_mask, self.tokens_count = self.precompute_prompts()
+        self.emb = self.emb.to(torch.bfloat16)
+        
+        del self.tokenizer
+        del self.text_encoder
+
+        self.learnable_token_norm_weights = torch.nn.LayerNorm(local_config.no_vision_learnable_tokens)
+        if local_config.use_learned_tokens:
+            self.learnable_token_norm_weights.load_state_dict(torch.load("norm_weights.pt", weights_only=True))
+            self.learnable_token_norm_weights = self.learnable_token_norm_weights.to(torch.bfloat16)
+        self.learnable_token_norm_weights.to(local_config.device)
+
+        if local_config.use_learned_tokens:
+            self.learnable_token_language_weights = torch.load("learnable_token_language_weights.pt", weights_only=False)
+            self.learnable_token_language_no_object = torch.load("learnable_token_language_no_object.pt", weights_only=False)
+        else:
+            self.learnable_token_language_weights = torch.nn.Embedding(300, 1).to(local_config.device)
+            self.learnable_token_language_no_object = torch.nn.Embedding(1, 2304).to(local_config.device)
+        
 
     @classmethod
     def from_config(cls, cfg):
@@ -96,96 +211,96 @@ class SAN(nn.Module):
             importance_sample_ratio=cfg.MODEL.SAN.IMPORTANCE_SAMPLE_RATIO,
         )
         ## end of copy
-
-        model, _, preprocess = open_clip.create_model_and_transforms(
-            cfg.MODEL.SAN.CLIP_MODEL_NAME,
-            pretrained=cfg.MODEL.SAN.CLIP_PRETRAINED_NAME,
-        )
-        ov_classifier = LearnableBgOvClassifier(
-            model, templates=get_predefined_templates(cfg.MODEL.SAN.CLIP_TEMPLATE_SET)
-        )
-
-        clip_visual_extractor = FeatureExtractor(
-            model.visual,
-            last_layer_idx=cfg.MODEL.SAN.FEATURE_LAST_LAYER_IDX,
-            frozen_exclude=cfg.MODEL.SAN.CLIP_FROZEN_EXCLUDE,
-        )
-        clip_rec_head = RecWithAttnbiasHead(
-            model.visual,
-            first_layer_idx=cfg.MODEL.SAN.FEATURE_LAST_LAYER_IDX,
-            frozen_exclude=cfg.MODEL.SAN.CLIP_DEEPER_FROZEN_EXCLUDE,
-            cross_attn=cfg.MODEL.SAN.REC_CROSS_ATTN,
-            sos_token_format=cfg.MODEL.SAN.SOS_TOKEN_FORMAT,
-            sos_token_num=cfg.MODEL.SIDE_ADAPTER.NUM_QUERIES,
-            downsample_method=cfg.MODEL.SAN.REC_DOWNSAMPLE_METHOD,
-        )
-
-        pixel_mean, pixel_std = (
-            preprocess.transforms[-1].mean,
-            preprocess.transforms[-1].std,
-        )
-        pixel_mean = [255.0 * x for x in pixel_mean]
-        pixel_std = [255.0 * x for x in pixel_std]
-
         return {
-            "clip_visual_extractor": clip_visual_extractor,
-            "clip_rec_head": clip_rec_head,
-            "side_adapter_network": build_side_adapter_network(
-                cfg, clip_visual_extractor.output_shapes
-            ),
-            "ov_classifier": ov_classifier,
             "criterion": criterion,
-            "size_divisibility": cfg.MODEL.SAN.SIZE_DIVISIBILITY,
-            "asymetric_input": cfg.MODEL.SAN.ASYMETRIC_INPUT,
-            "clip_resolution": cfg.MODEL.SAN.CLIP_RESOLUTION,
             "sem_seg_postprocess_before_inference": cfg.MODEL.SAN.SEM_SEG_POSTPROCESS_BEFORE_INFERENCE,
-            "pixel_mean": pixel_mean,
-            "pixel_std": pixel_std,
         }
+    
+    def precompute_prompts(self):
+        precomputed_embs = {}
+        prompts = [local_config.default_prompt + " " + local_config.subprompt.format(target=current_target) for current_target in self.clean_labels]
+        # default prompt for model inference
+        prompts.append(
+            local_config.default_prompt
+        )
+        return self.embed_condition(prompts)
+    
+    def embed_condition(self, prompts):
+        caption_token = self.tokenizer(
+            prompts, max_length=506, padding="max_length", truncation=True, return_tensors="pt"
+        ).to(local_config.device)
+        select_index = [0] + list(range(-300 + 1, 0))
+        caption_embs_list = [self.text_encoder(caption_token.input_ids[[i]], caption_token.attention_mask[[i]])[0][:, None][
+            :, :, select_index
+        ] for i in range(caption_token.input_ids.shape[0])]
+        caption_embs = torch.cat(caption_embs_list, dim=0).cpu()
+        tokens_count = caption_token.attention_mask.sum(dim=-1)
+        emb_masks = caption_token.attention_mask[:, select_index]
+        return caption_embs, emb_masks, tokens_count
+    
+    def run_diffusion_model(self, image, target_labels, segment_data):
+        # TODO
+        emb = self.emb[-1].unsqueeze(0)
+        emb_mask = self.emb_mask[-1].unsqueeze(0)
+        tokens_count = self.tokens_count[-1]
+        model_kwargs = dict(data_info={"img_hw": image.shape[-2], "aspect_ratio": 1}, mask=emb_mask)
+        segment_data["tokens_count"] = tokens_count
+
+        dpm_solver = DPMS(
+            self.model.forward_with_dpmsolver,
+            condition=emb,
+            uncondition=None,
+            model_type="flow",
+            model_kwargs=model_kwargs,
+            schedule="FLOW",
+            cfg_scale=3.5
+        )
+
+        samples = dpm_solver.segment(
+            image.unsqueeze(0),
+            segment_data
+        )
+
+    def call_model(self, file_id, image_tensor, label_indexes, target_labels, gt_ids, original_shape, gt):
+        segment_data = {"labels": target_labels, "img_id": file_id, "label_ids": label_indexes, \
+            "gt_ids": gt_ids, "targets": target_labels, "gt": gt}
+        with torch.enable_grad():
+            self.run_diffusion_model(image_tensor, target_labels, segment_data)
+        
+        visual_features = segment_data["all_vision_features"]
+        vl_features = segment_data["vl_learned"]
+        learned_vision = visual_features[:,:,:local_config.no_vision_learnable_tokens,:]
+        dense_vision = visual_features[:,:,local_config.no_vision_learnable_tokens:,:]
+        h, w = segment_data["hw"]
+        prediction = None
+        loss = None
+        dice_loss = None
+        if local_config.save_learned_tokens:
+            with torch.enable_grad():
+                prediction, loss, dice_loss = compute_masks_utils.compute_loss(dense_vision, learned_vision, vl_features, self.emb, self.learnable_token_norm_weights, self.learnable_token_language_weights.weight, self.learnable_token_language_no_object.weight, gt, label_indexes, h, w)
+        else:
+            prediction = compute_masks_utils.compute_masks(dense_vision, learned_vision, vl_features, self.emb, self.learnable_token_norm_weights,  self.learnable_token_language_weights.weight, self.learnable_token_language_no_object.weight,label_indexes)
+            prediction = prediction.view(1, 171, h, w)
+        return prediction, loss, dice_loss
+
+    def single_batch(self, file_id, image_tensor, label_indexes, target_labels, gt_ids, original_shape, gt):
+        return self.call_model(file_id, image_tensor, label_indexes, target_labels, gt_ids, original_shape, gt)
+
+    def single_class(self, file_id, image_tensor, label_indexes, target_labels, gt_ids, original_shape, gt):
+        prediction, loss, loss_dice = self.call_model(file_id, image_tensor, label_indexes, target_labels, gt_ids, original_shape, gt)
 
     def forward(self, batched_inputs):
-        # get classifier weight for each dataset
-        # !! Could be computed once and saved. It will run only once per dataset.
-        if "vocabulary" in batched_inputs[0]:
-            ov_classifier_weight = (
-                self.ov_classifier.logit_scale.exp()
-                * self.ov_classifier.get_classifier_by_vocabulary(
-                    batched_inputs[0]["vocabulary"]
-                )
-            )
-        else:
-            dataset_names = [x["meta"]["dataset_name"] for x in batched_inputs]
-            assert (
-                len(list(set(dataset_names))) == 1
-            ), "All images in a batch must be from the same dataset."
-            ov_classifier_weight = (
-                self.ov_classifier.logit_scale.exp()
-                * self.ov_classifier.get_classifier_by_dataset_name(dataset_names[0])
-            )  # C+1,ndim
-        images = [x["image"].to(self.device) for x in batched_inputs]
-        images = [(x - self.pixel_mean) / self.pixel_std for x in images]
+        images = [x["image"].to(local_config.device).float() / 255.0 for x in batched_inputs]
+        images = [x * 2 - 1 for x in images]
         images = ImageList.from_tensors(images, self.size_divisibility)
-        clip_input = images.tensor
-        if self.asymetric_input:
-            clip_input = F.interpolate(
-                clip_input, scale_factor=self.clip_resolution, mode="bilinear"
-            )
-        clip_image_features = self.clip_visual_extractor(clip_input)
-        mask_preds, attn_biases = self.side_adapter_network(
-            images.tensor, clip_image_features
-        )
-        # !! Could be optimized to run in parallel.
-        mask_embs = [
-            self.clip_rec_head(clip_image_features, attn_bias, normalize=True)
-            for attn_bias in attn_biases
-        ]  # [B,N,C]
-        mask_logits = [
-            torch.einsum("bqc,nc->bqn", mask_emb, ov_classifier_weight)
-            for mask_emb in mask_embs
-        ]
+        images_tensor = images.tensor
+        print("image tensor stats", images_tensor.shape, images_tensor.min(), images_tensor.max(), images_tensor.mean())
+
+        mask_preds = None
+        mask_logits = None
         if self.training:
             if "instances" in batched_inputs[0]:
-                gt_instances = [x["instances"].to(self.device) for x in batched_inputs]
+                gt_instances = [x["instances"].to(local_config.device) for x in batched_inputs]
                 targets = self.prepare_targets(gt_instances, images)
             else:
                 targets = None
