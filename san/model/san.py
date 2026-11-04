@@ -30,6 +30,24 @@ from t2i.diffusion.model.trainer import PixDiTTrainer
 import t2i.pixdit_core.compute_masks as compute_masks_utils
 
 import t2i.config as local_config
+from detectron2.data import MetadataCatalog
+
+
+def get_dataset_labels(dataset_name: str) -> List[str]:
+    """Class names used to build text embeddings for `dataset_name`.
+
+    Priority:
+      1. local_config.label_json_overrides[dataset_name] (a catseg-style JSON list)
+      2. MetadataCatalog stuff_classes (falls back to thing_classes)
+    The order must match the contiguous class ids of that dataset's GT masks.
+    """
+    overrides = getattr(local_config, "label_json_overrides", {}) or {}
+    if dataset_name in overrides:
+        with open(overrides[dataset_name]) as f:
+            return [x for x in json.load(f) if x != "unknown"]
+    meta = MetadataCatalog.get(dataset_name)
+    classes = meta.stuff_classes if hasattr(meta, "stuff_classes") else meta.thing_classes
+    return [c.strip() for c in classes]
 
 @dataclass
 class PixelDiTInference(PixDiTConfig):
@@ -139,6 +157,8 @@ class SAN(nn.Module):
         self,
         *,
         criterion: SetCriterion,
+        train_dataset_names: List[str],
+        test_dataset_names: List[str],
         sem_seg_postprocess_before_inference: bool = False,
     ):
         super().__init__()
@@ -147,13 +167,32 @@ class SAN(nn.Module):
         self.criterion = criterion
 
         self.model, self.tokenizer, self.text_encoder = get_model()
-        with open(local_config.ds_config_path) as f:
-            self.labels = json.load(f)
-        self.clean_labels = [x for x in self.labels if x != "unknown"]
-        
-        self.emb, self.emb_mask, self.tokens_count = self.precompute_prompts()
-        self.emb = self.emb.to(torch.float32)
-        
+
+        # The diffusion model is always conditioned on the dataset-agnostic default prompt.
+        default_emb, default_mask, default_tokens = self.embed_condition([local_config.default_prompt])
+        self.default_emb = default_emb.to(torch.float32)      # (1, 1, 300, D)
+        self.default_emb_mask = default_mask                  # (1, 300)
+        self.default_tokens_count = default_tokens[0]
+
+        # Per-dataset class embeddings, computed once while the text encoder is loaded.
+        # Training datasets stay on GPU; validation-only ones are kept on CPU to save memory.
+        self.default_dataset = train_dataset_names[0]
+        self.class_labels = {}   # dataset_name -> List[str]
+        self.class_embs = {}     # dataset_name -> (C, 1, 300, D)
+        for name in dict.fromkeys(list(train_dataset_names) + list(test_dataset_names)):
+            labels = get_dataset_labels(name)
+            if labels in self.class_labels.values():
+                # identical vocabulary already embedded (e.g. coco train/test splits)
+                src = next(k for k, v in self.class_labels.items() if v == labels)
+                self.class_labels[name], self.class_embs[name] = labels, self.class_embs[src]
+                continue
+            embs = self.precompute_prompts(labels).to(torch.float32)
+            if name not in train_dataset_names:
+                embs = embs.cpu()
+            self.class_labels[name], self.class_embs[name] = labels, embs
+        # Cache of token-weighted class vectors, valid only while weights are frozen (eval).
+        self._language_target_cache = {}
+
         del self.tokenizer
         del self.text_encoder
 
@@ -213,17 +252,16 @@ class SAN(nn.Module):
         ## end of copy
         return {
             "criterion": criterion,
+            "train_dataset_names": list(cfg.DATASETS.TRAIN),
+            "test_dataset_names": list(cfg.DATASETS.TEST),
             "sem_seg_postprocess_before_inference": cfg.MODEL.SAN.SEM_SEG_POSTPROCESS_BEFORE_INFERENCE,
         }
     
-    def precompute_prompts(self):
-        precomputed_embs = {}
-        prompts = [local_config.default_prompt + " " + local_config.subprompt.format(target=current_target) for current_target in self.clean_labels]
-        # default prompt for model inference
-        prompts.append(
-            local_config.default_prompt
-        )
-        return self.embed_condition(prompts)
+    @torch.no_grad()
+    def precompute_prompts(self, labels: List[str]):
+        prompts = [local_config.default_prompt + " " + local_config.subprompt.format(target=t) for t in labels]
+        embs, _, _ = self.embed_condition(prompts)
+        return embs  # (C, 1, 300, D)
     
     def embed_condition(self, prompts):
         caption_token = self.tokenizer(
@@ -240,9 +278,9 @@ class SAN(nn.Module):
     
     def run_diffusion_model(self, image, segment_data):
         # TODO
-        emb = self.emb[-1].unsqueeze(0)
-        emb_mask = self.emb_mask[-1].unsqueeze(0)
-        tokens_count = self.tokens_count[-1]
+        emb = self.default_emb
+        emb_mask = self.default_emb_mask
+        tokens_count = self.default_tokens_count
         model_kwargs = dict(data_info={"img_hw": image.shape[-2], "aspect_ratio": 1}, mask=emb_mask)
         segment_data["tokens_count"] = tokens_count
 
@@ -262,21 +300,44 @@ class SAN(nn.Module):
         )
 
     @staticmethod
-    def clasify_masks(visual_tokens, language_tokens, language_weights, language_no_object):
-        # WARNING: language_tokens are kept on CPU
-        # visual_tokens -> (l, d), language_tokens -> (t,d)
+    def language_targets(language_tokens, language_weights, chunk_size=64):
+        """(C, 1, 300, D) class token embeddings -> (C, 1, D) using learned token weights.
+        Chunked so large vocabularies stored on CPU never sit on the GPU all at once."""
+        device = language_weights.device
+        out = []
+        for i in range(0, language_tokens.shape[0], chunk_size):
+            chunk = language_tokens[i:i + chunk_size].to(device, non_blocking=True)
+            out.append((language_weights * chunk).sum(dim=-2))
+        return torch.cat(out, dim=0)
+
+    def get_language_targets(self, dataset_name):
+        weights = self.learnable_token_language_weights.weight
+        if self.training:
+            self._language_target_cache.clear()
+            return SAN.language_targets(self.class_embs[dataset_name], weights)
+        if dataset_name not in self._language_target_cache:
+            with torch.no_grad():
+                self._language_target_cache[dataset_name] = SAN.language_targets(
+                    self.class_embs[dataset_name], weights
+                )
+        return self._language_target_cache[dataset_name]
+
+    def train(self, mode: bool = True):
+        self._language_target_cache = {}
+        return super().train(mode)
+
+    @staticmethod
+    def clasify_masks(visual_tokens, language_targets, language_no_object):
+        # visual_tokens -> (B, layers, Q, D), language_targets -> (C, 1, D)
         B = visual_tokens.shape[0]
         visual_tokens = visual_tokens.sum(dim=1) # sum across layers TODO: try other ways of aggregating visual features for comparison with language
-        language_tokens_selected = language_tokens[:171]
-        language_targets = language_weights * language_tokens_selected
-        language_targets = language_targets.sum(dim=-2)
         language_targets = torch.cat([language_targets, language_no_object[None,:,:]], dim=0).permute(1,2,0).expand(B, -1, -1)
         visual_tokens = visual_tokens.permute(0,2,1)
         my_norm = lambda x,d: torch.nn.functional.normalize(x, dim=d)
         classes = my_norm(visual_tokens, 1).permute(0,2,1) @ my_norm(language_targets, 1)
         return classes
     
-    def call_model(self, image_tensor):
+    def call_model(self, image_tensor, dataset_name):
         segment_data = {}
         with torch.enable_grad():
             self.run_diffusion_model(image_tensor, segment_data)
@@ -296,7 +357,11 @@ class SAN(nn.Module):
         mask_pred = self.learnable_token_norm_weights(mask_pred)
         mask_pred = mask_pred.sum(dim=1)
 
-        mask_logits = SAN.clasify_masks(vl_features, self.emb, self.learnable_token_language_weights.weight, self.learnable_token_language_no_object.weight)
+        mask_logits = SAN.clasify_masks(
+            vl_features,
+            self.get_language_targets(dataset_name),
+            self.learnable_token_language_no_object.weight,
+        )
         B, P, L = mask_pred.shape
         return mask_logits, mask_pred.permute(0, 2, 1).view(B, L, h, w)
 
@@ -312,7 +377,7 @@ class SAN(nn.Module):
         images_tensor = images.tensor
         # print("image tensor stats", images_tensor.shape, images_tensor.min(), images_tensor.max(), images_tensor.mean())
         # print("ids",  [x["file_name"]for x in batched_inputs])
-        mask_logits, mask_preds = self.call_model(images_tensor)
+        mask_logits, mask_preds = self.call_model(images_tensor, self._dataset_name(batched_inputs))
         if self.training:
             if "instances" in batched_inputs[0]:
                 gt_instances = [x["instances"].to(local_config.device) for x in batched_inputs]
@@ -376,6 +441,17 @@ class SAN(nn.Module):
                 processed_results[-1]["sem_seg"] = r
             return processed_results
 
+    def _dataset_name(self, batched_inputs):
+        names = {x.get("meta", {}).get("dataset_name", self.default_dataset) for x in batched_inputs}
+        assert len(names) == 1, f"All images in a batch must be from the same dataset, got {names}"
+        name = names.pop()
+        if name not in self.class_embs:
+            raise KeyError(
+                f"No text embeddings for '{name}'. Add it to DATASETS.TEST (or TRAIN) so its "
+                "class names are embedded at model construction."
+            )
+        return name
+
     def prepare_targets(self, targets, images):
         h_pad, w_pad = images.tensor.shape[-2:]
         new_targets = []
@@ -404,4 +480,4 @@ class SAN(nn.Module):
 
     @property
     def device(self):
-        return self.pixel_mean.device
+        return torch.device(local_config.device)

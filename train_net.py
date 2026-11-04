@@ -46,6 +46,14 @@ from san import (
 from san.data import build_detection_test_loader, build_detection_train_loader
 from san.utils import WandbWriter, setup_wandb
 
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"`torch\.cuda\.amp\.autocast.*is deprecated",
+    category=FutureWarning,
+)
+os.environ["WANDB_MODE"] = "disabled"
 
 class Trainer(DefaultTrainer):
     def build_writers(self):

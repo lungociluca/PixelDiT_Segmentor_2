@@ -89,3 +89,11 @@ use_model_vectors = False
 
 # TODO: update
 use_learned_tokens = not save_learned_tokens
+
+# Class names used for the text embeddings of each detectron2 dataset (by registered name).
+# Datasets not listed here use MetadataCatalog.get(name).stuff_classes.
+# The order must match the contiguous class ids in that dataset's GT masks.
+label_json_overrides = {
+    "coco_2017_train_stuff_sem_seg": dataset_paths[EvalDataset.COCO]["json"],
+    "coco_2017_test_stuff_sem_seg": dataset_paths[EvalDataset.COCO]["json"],
+}
