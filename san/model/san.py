@@ -1,4 +1,5 @@
-from typing import List
+import math
+from typing import Dict, List
 
 import open_clip
 import torch
@@ -31,6 +32,24 @@ import t2i.pixdit_core.compute_masks as compute_masks_utils
 
 import t2i.config as local_config
 from detectron2.data import MetadataCatalog
+
+
+# ---------------------------------------------------------------------------
+# Class-embedding settings. Override any of these in t2i/config.py.
+# ---------------------------------------------------------------------------
+# Short per-class prompt. Must contain "{target}" exactly once.
+CLASS_PROMPT_TEMPLATE = getattr(local_config, "class_prompt_template", "a photo of a {target}.")
+# "class_tokens": mean over the tokens of the class name only (falls back to "all_tokens"
+#                 if the tokenizer cannot give character offsets).
+# "all_tokens":   mean over every real token except BOS.
+CLASS_EMB_POOLING = getattr(local_config, "class_emb_pooling", "class_tokens")
+# "train":   subtract the mean of the training vocabulary (same shift for every dataset).
+# "dataset": subtract each dataset's own class mean.
+# "none":    no centering.
+CLASS_EMB_CENTERING = getattr(local_config, "class_emb_centering", "train")
+# Log pairwise-similarity stats of the class targets (and of the old long-prompt targets
+# for comparison) when the model is built.
+DEBUG_CLASS_SIMILARITY = getattr(local_config, "debug_class_similarity", False)
 
 
 def get_dataset_labels(dataset_name: str) -> List[str]:
@@ -165,33 +184,67 @@ class SAN(nn.Module):
         self.size_divisibility = 16
         self.sem_seg_postprocess_before_inference = sem_seg_postprocess_before_inference
         self.criterion = criterion
+        logger = get_root_logger()
 
         self.model, self.tokenizer, self.text_encoder = get_model()
 
         # The diffusion model is always conditioned on the dataset-agnostic default prompt.
+        # (Unchanged: this long prompt is only used for conditioning, not for class targets.)
         default_emb, default_mask, default_tokens = self.embed_condition([local_config.default_prompt])
         self.default_emb = default_emb.to(torch.float32)      # (1, 1, 300, D)
         self.default_emb_mask = default_mask                  # (1, 300)
         self.default_tokens_count = default_tokens[0]
 
-        # Per-dataset class embeddings, computed once while the text encoder is loaded.
-        # Training datasets stay on GPU; validation-only ones are kept on CPU to save memory.
+        # ------------------------------------------------------------------
+        # Per-dataset class embeddings, built from short prompts that only carry
+        # class information. Each one is (C, D): small enough to keep on GPU for
+        # every dataset, including large validation vocabularies.
+        # ------------------------------------------------------------------
         self.default_dataset = train_dataset_names[0]
-        self.class_labels = {}   # dataset_name -> List[str]
-        self.class_embs = {}     # dataset_name -> (C, 1, 300, D)
-        for name in dict.fromkeys(list(train_dataset_names) + list(test_dataset_names)):
+        self.class_labels: Dict[str, List[str]] = {}
+        self.class_embs: Dict[str, torch.Tensor] = {}   # dataset_name -> (C, D), centered
+        pooled_by_label: Dict[str, torch.Tensor] = {}    # label -> (D,), unit norm, uncentered
+        raw_embs: Dict[str, torch.Tensor] = {}
+
+        all_names = list(dict.fromkeys(list(train_dataset_names) + list(test_dataset_names)))
+        for name in all_names:
             labels = get_dataset_labels(name)
-            if labels in self.class_labels.values():
-                # identical vocabulary already embedded (e.g. coco train/test splits)
-                src = next(k for k, v in self.class_labels.items() if v == labels)
-                self.class_labels[name], self.class_embs[name] = labels, self.class_embs[src]
-                continue
-            embs = self.precompute_prompts(labels).to(torch.float32)
-            if name not in train_dataset_names:
-                embs = embs.cpu()
-            self.class_labels[name], self.class_embs[name] = labels, embs
-        # Cache of token-weighted class vectors, valid only while weights are frozen (eval).
-        self._language_target_cache = {}
+            missing = [c for c in dict.fromkeys(labels) if c not in pooled_by_label]
+            if missing:
+                new = self.embed_class_names(missing)
+                pooled_by_label.update(zip(missing, new))
+            self.class_labels[name] = labels
+            raw_embs[name] = torch.stack([pooled_by_label[c] for c in labels])
+
+        # Remove the component shared by all classes (template words, Gemma's
+        # outlier dimensions) so cosine similarity reflects class differences.
+        if CLASS_EMB_CENTERING == "train":
+            train_labels = list(dict.fromkeys(c for n in train_dataset_names for c in self.class_labels[n]))
+            train_mean = torch.stack([pooled_by_label[c] for c in train_labels]).mean(dim=0)
+            for name in all_names:
+                self.class_embs[name] = raw_embs[name] - train_mean
+        elif CLASS_EMB_CENTERING == "dataset":
+            for name in all_names:
+                e = raw_embs[name]
+                self.class_embs[name] = e - e.mean(dim=0, keepdim=True) if e.shape[0] > 1 else e
+        elif CLASS_EMB_CENTERING == "none":
+            self.class_embs = dict(raw_embs)
+        else:
+            raise ValueError(f"Unknown class_emb_centering: {CLASS_EMB_CENTERING}")
+        self.class_embs = {k: v.to(local_config.device) for k, v in self.class_embs.items()}
+        emb_dim = next(iter(self.class_embs.values())).shape[-1]
+
+        logger.info(
+            f"Class embeddings: template={CLASS_PROMPT_TEMPLATE!r}, pooling={CLASS_EMB_POOLING}, "
+            f"centering={CLASS_EMB_CENTERING}, dim={emb_dim}"
+        )
+        for name in all_names:
+            self.log_class_similarity(name)
+
+        if DEBUG_CLASS_SIMILARITY:
+            # Compare against the old long-prompt targets for the smallest dataset.
+            small = min(all_names, key=lambda n: len(self.class_labels[n]))
+            self._debug_compare_with_legacy_targets(small, raw_embs[small])
 
         del self.tokenizer
         del self.text_encoder
@@ -202,13 +255,33 @@ class SAN(nn.Module):
             self.learnable_token_norm_weights = self.learnable_token_norm_weights
         self.learnable_token_norm_weights.to(local_config.device)
 
+        # The class targets are now fixed text embeddings, so there are no learned
+        # per-position language weights anymore. Only the "no object" target is learned.
         if local_config.use_learned_tokens:
-            self.learnable_token_language_weights = torch.load("learnable_token_language_weights.pt", weights_only=False)
             self.learnable_token_language_no_object = torch.load("learnable_token_language_no_object.pt", weights_only=False)
         else:
-            self.learnable_token_language_weights = torch.nn.Embedding(300, 1).to(local_config.device)
-            self.learnable_token_language_no_object = torch.nn.Embedding(1, 2304).to(local_config.device)
-        
+            self.learnable_token_language_no_object = torch.nn.Embedding(1, emb_dim).to(local_config.device)
+
+        # Temperature for the cosine-similarity class logits, kept in log space as in CLIP.
+        # Training: starts at log(1/0.07). Inference: read from the file saved after training.
+        if local_config.use_learned_tokens:
+            logit_scale = torch.load("learnable_token_logit_scale.pt", map_location=local_config.device, weights_only=True)
+        else:
+            logit_scale = torch.tensor(math.log(1 / 0.07), device=local_config.device)
+        self.learnable_token_logit_scale = nn.Parameter(
+            logit_scale.float(), requires_grad=local_config.save_learned_tokens
+        )
+
+    def get_logit_scale(self):
+        # Clamped at 100 like CLIP so the logits cannot blow up.
+        return self.learnable_token_logit_scale.exp().clamp(max=100)
+
+    def save_learned_weights(self):
+        """Save the SAN-level learned weights (PixelDiT blocks save their own in __del__)."""
+        torch.save(self.learnable_token_norm_weights.state_dict(), "norm_weights.pt")
+        torch.save(self.learnable_token_language_no_object, "learnable_token_language_no_object.pt")
+        torch.save(self.learnable_token_logit_scale.detach().cpu(), "learnable_token_logit_scale.pt")
+
 
     @classmethod
     def from_config(cls, cfg):
@@ -256,10 +329,112 @@ class SAN(nn.Module):
             "test_dataset_names": list(cfg.DATASETS.TEST),
             "sem_seg_postprocess_before_inference": cfg.MODEL.SAN.SEM_SEG_POSTPROCESS_BEFORE_INFERENCE,
         }
-    
+
+    # ------------------------------------------------------------------
+    # Class embeddings
+    # ------------------------------------------------------------------
+    @torch.no_grad()
+    def embed_class_names(self, labels: List[str]) -> torch.Tensor:
+        """Embed each class with a short prompt and mean-pool its hidden states.
+
+        Returns (C, D) float32, each row L2-normalized (before centering), so classes
+        with longer names or larger activations don't dominate the class mean.
+        No padding is involved: every prompt is encoded on its own.
+        """
+        logger = get_root_logger()
+        template = CLASS_PROMPT_TEMPLATE
+        assert template.count("{target}") == 1, "class_prompt_template must contain {target} once"
+        name_start = template.index("{target}")
+        use_offsets = CLASS_EMB_POOLING == "class_tokens" and getattr(self.tokenizer, "is_fast", False)
+        if CLASS_EMB_POOLING == "class_tokens" and not use_offsets:
+            logger.warning("Tokenizer has no offset mapping; pooling over all tokens instead of class tokens.")
+        bos_id = getattr(self.tokenizer, "bos_token_id", None)
+
+        out = []
+        for c in labels:
+            prompt = template.format(target=c)
+            span = (name_start, name_start + len(c))
+            tok = self.tokenizer(prompt, return_tensors="pt", return_offsets_mapping=use_offsets)
+            offsets = tok.pop("offset_mapping", None)
+            tok = tok.to(local_config.device)
+            hidden = self.text_encoder(tok.input_ids, tok.attention_mask)[0][0].float()  # (L, D)
+
+            keep = tok.attention_mask[0].bool().clone()
+            # BOS acts as an attention sink in Gemma: huge norm, same for every prompt.
+            if bos_id is not None and tok.input_ids[0, 0].item() == bos_id:
+                keep[0] = False
+
+            if use_offsets:
+                o = offsets[0].to(local_config.device)
+                in_name = (o[:, 0] < span[1]) & (o[:, 1] > span[0]) & keep
+                if in_name.any():
+                    keep = in_name
+                else:
+                    logger.warning(f"No tokens found for class name {c!r}; pooling over all tokens.")
+
+            out.append(hidden[keep].mean(dim=0))
+        return F.normalize(torch.stack(out), dim=-1)
+
+    @staticmethod
+    def similarity_stats(targets: torch.Tensor):
+        """Pairwise cosine similarity of class targets of shape (C, ..., D).
+
+        Returns the (C, C) matrix and a dict of off-diagonal summary stats.
+        """
+        t = F.normalize(targets.reshape(targets.shape[0], -1, targets.shape[-1]).sum(1).float(), dim=-1)
+        sim = t @ t.T
+        C = sim.shape[0]
+        if C < 2:
+            return sim, {}
+        off = sim[~torch.eye(C, dtype=torch.bool, device=sim.device)]
+        stats = {
+            "mean": off.mean().item(),
+            "min": off.min().item(),
+            "max": off.max().item(),
+            "frac>0.95": (off > 0.95).float().mean().item(),
+        }
+        return sim, stats
+
+    def log_class_similarity(self, dataset_name: str):
+        """Log how separable the class targets of `dataset_name` are, plus the most similar pairs."""
+        logger = get_root_logger()
+        sim, stats = SAN.similarity_stats(self.class_embs[dataset_name])
+        if not stats:
+            return sim
+        labels = self.class_labels[dataset_name]
+        C = sim.shape[0]
+        masked = sim.clone()
+        masked[torch.triu(torch.ones(C, C, dtype=torch.bool, device=sim.device)) == 0] = -2
+        masked.fill_diagonal_(-2)
+        k = min(5, C * (C - 1) // 2)
+        vals, idx = masked.flatten().topk(k)
+        pairs = ", ".join(f"{labels[i // C]}/{labels[i % C]}={v:.2f}" for v, i in zip(vals.tolist(), idx.tolist()))
+        logger.info(
+            f"[{dataset_name}] {C} classes, pairwise cos: mean={stats['mean']:.3f} min={stats['min']:.3f} "
+            f"max={stats['max']:.3f} frac>0.95={stats['frac>0.95']:.2%} | most similar: {pairs}"
+        )
+        return sim
+
+    @torch.no_grad()
+    def _debug_compare_with_legacy_targets(self, dataset_name: str, raw: torch.Tensor):
+        """Log similarity stats for: old long-prompt targets, new uncentered, new centered."""
+        logger = get_root_logger()
+        labels = self.class_labels[dataset_name]
+        legacy = []
+        weights = torch.randn(300, 1, device=local_config.device)  # same init as the old nn.Embedding(300, 1)
+        for i in range(0, len(labels), 16):
+            embs = self.precompute_prompts(labels[i:i + 16]).float()  # (c, 1, 300, D)
+            legacy.append((weights * embs).sum(dim=-2))                # (c, 1, D)
+        legacy = torch.cat(legacy)
+        for tag, t in [("legacy long prompt", legacy), ("short prompt, uncentered", raw),
+                       ("short prompt, centered", self.class_embs[dataset_name])]:
+            _, s = SAN.similarity_stats(t)
+            logger.info(f"[debug {dataset_name}] {tag}: " + ", ".join(f"{k}={v:.3f}" for k, v in s.items()))
+
     @torch.no_grad()
     def precompute_prompts(self, labels: List[str]):
-        prompts = [local_config.default_prompt + " " + local_config.subprompt.format(target=t) for t in labels]
+        # Old long-prompt class embedding; only used by the debug comparison now.
+        prompts = [local_config.subprompt.format(target=t) for t in labels]
         embs, _, _ = self.embed_condition(prompts)
         return embs  # (C, 1, 300, D)
     
@@ -299,32 +474,9 @@ class SAN(nn.Module):
             segment_data
         )
 
-    @staticmethod
-    def language_targets(language_tokens, language_weights, chunk_size=64):
-        """(C, 1, 300, D) class token embeddings -> (C, 1, D) using learned token weights.
-        Chunked so large vocabularies stored on CPU never sit on the GPU all at once."""
-        device = language_weights.device
-        out = []
-        for i in range(0, language_tokens.shape[0], chunk_size):
-            chunk = language_tokens[i:i + chunk_size].to(device, non_blocking=True)
-            out.append((language_weights * chunk).sum(dim=-2))
-        return torch.cat(out, dim=0)
-
     def get_language_targets(self, dataset_name):
-        weights = self.learnable_token_language_weights.weight
-        if self.training:
-            self._language_target_cache.clear()
-            return SAN.language_targets(self.class_embs[dataset_name], weights)
-        if dataset_name not in self._language_target_cache:
-            with torch.no_grad():
-                self._language_target_cache[dataset_name] = SAN.language_targets(
-                    self.class_embs[dataset_name], weights
-                )
-        return self._language_target_cache[dataset_name]
-
-    def train(self, mode: bool = True):
-        self._language_target_cache = {}
-        return super().train(mode)
+        # (C, D) fixed text embeddings -> (C, 1, D), the shape clasify_masks expects.
+        return self.class_embs[dataset_name][:, None, :]
 
     @staticmethod
     def clasify_masks(visual_tokens, language_targets, language_no_object):
@@ -362,6 +514,8 @@ class SAN(nn.Module):
             self.get_language_targets(dataset_name),
             self.learnable_token_language_no_object.weight,
         )
+        # Cosine similarities live in [-1, 1]; scale them into usable logits (loss and inference).
+        mask_logits = mask_logits * self.get_logit_scale()
         B, P, L = mask_pred.shape
         return mask_logits, mask_pred.permute(0, 2, 1).view(B, L, h, w)
 

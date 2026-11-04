@@ -49,6 +49,11 @@ default_prompt = 'Given a user prompt, generate an "Enhanced prompt" that provid
 subprompt = 'There must be {target} somewhere in the picture.'
 prompt_format = 'This should be a realistic image. A scene with a {target} somewhere. The {target} can be close or far. It can be a small {target} or a large {target}. There should be other stuff, for example: sky, vegetation, mutliple objects.' 
 
+class_prompt_template = "a photo of a {target}."
+class_emb_pooling = "class_tokens"   # or "all_tokens"
+class_emb_centering = "train"        # or "dataset", "none"
+debug_class_similarity = False
+
 device = "cuda"
 eval_dataset = EvalDataset.COCO
 current_ds_paths = dataset_paths[eval_dataset]

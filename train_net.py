@@ -45,6 +45,7 @@ from san import (
 )
 from san.data import build_detection_test_loader, build_detection_train_loader
 from san.utils import WandbWriter, setup_wandb
+import t2i.config as local_config
 
 import warnings
 
@@ -247,7 +248,13 @@ def main(args):
     trainer = Trainer(cfg)
 
     trainer.resume_or_load(resume=args.resume)
-    return trainer.train()
+    res = trainer.train()
+
+    # Save the SAN-level learned weights (incl. the logit scale) for later inference runs.
+    if local_config.save_learned_tokens and comm.is_main_process():
+        model = getattr(trainer.model, "module", trainer.model)  # unwrap DistributedDataParallel
+        model.save_learned_weights()
+    return res
 
 
 if __name__ == "__main__":
