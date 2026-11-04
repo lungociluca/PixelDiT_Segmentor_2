@@ -7,8 +7,10 @@ try:
     warnings.filterwarnings("ignore", category=ShapelyDeprecationWarning)
 except:
     pass
+import contextlib
 import copy
 import itertools
+import time
 import logging
 import os
 from collections import OrderedDict, defaultdict
@@ -23,6 +25,7 @@ from detectron2.config import get_cfg
 from detectron2.data import MetadataCatalog
 from detectron2.engine import (
     DefaultTrainer,
+    SimpleTrainer,
     default_argument_parser,
     default_setup,
     launch,
@@ -34,7 +37,7 @@ from detectron2.evaluation import (
     verify_results,
 )
 from detectron2.projects.deeplab import add_deeplab_config, build_lr_scheduler
-from detectron2.solver.build import maybe_add_gradient_clipping
+from detectron2.utils.events import get_event_storage
 from detectron2.utils.logger import setup_logger
 from tabulate import tabulate
 
@@ -56,7 +59,164 @@ warnings.filterwarnings(
 )
 os.environ["WANDB_MODE"] = "disabled"
 
+
+def get_grad_accum_steps() -> int:
+    steps = int(getattr(local_config, "grad_accumulation", 1) or 1)
+    assert steps >= 1, f"grad_accumulation must be >= 1, got {steps}"
+    return steps
+
+
+class GradAccumClipTrainer(SimpleTrainer):
+    """
+    SimpleTrainer / AMPTrainer replacement with gradient accumulation and clipping.
+
+    One detectron2 "iteration" = one micro-batch of SOLVER.IMS_PER_BATCH images.
+    Gradients are summed over `accum_steps` micro-batches (each loss scaled by
+    1/accum_steps, so the result is the gradient of the mean loss), then clipped
+    once on the full accumulated gradient, then the optimizer steps.
+    Effective batch size = IMS_PER_BATCH * accum_steps (* num GPUs).
+    """
+
+    def __init__(self, model, data_loader, optimizer, accum_steps=1, clip_cfg=None,
+                 amp=False, amp_precision="float16"):
+        super().__init__(model, data_loader, optimizer)
+        self.accum_steps = accum_steps
+        self.clip_cfg = clip_cfg
+        self.amp = amp
+        self.amp_dtype = getattr(torch, amp_precision) if isinstance(amp_precision, str) else amp_precision
+        # A GradScaler is only needed for fp16; bf16 has fp32's exponent range.
+        use_scaler = amp and self.amp_dtype == torch.float16
+        if not use_scaler:
+            self.grad_scaler = None
+        elif hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+            self.grad_scaler = torch.amp.GradScaler("cuda")
+        else:  # older torch
+            self.grad_scaler = torch.cuda.amp.GradScaler()
+        self._micro_step = 0  # micro-batches accumulated in the current window
+        self.max_iter = None  # set by Trainer after construction
+
+    def _is_last_micro_step(self) -> bool:
+        return (
+            self._micro_step + 1 >= self.accum_steps
+            or (self.max_iter is not None and self.iter == self.max_iter - 1)  # flush a partial window at the end of training
+        )
+
+    def _clip_gradients(self):
+        """Clip the accumulated gradients in place; returns the pre-clip total norm."""
+        params = [p for g in self.optimizer.param_groups for p in g["params"] if p.grad is not None]
+        if not params:
+            return None
+        cfg = self.clip_cfg
+        norm_type = float(cfg.NORM_TYPE) if cfg is not None else 2.0
+        enabled = cfg is not None and cfg.ENABLED and cfg.CLIP_VALUE > 0
+        clip_type = cfg.CLIP_TYPE if enabled else None
+
+        if clip_type == "full_model":
+            # max_norm over all trainable params together
+            return torch.nn.utils.clip_grad_norm_(params, cfg.CLIP_VALUE, norm_type=norm_type)
+
+        # measure the total norm for logging without changing anything
+        total_norm = torch.nn.utils.clip_grad_norm_(params, float("inf"), norm_type=norm_type)
+        if clip_type == "norm":
+            # detectron2 semantics: clip each parameter tensor's norm separately
+            for p in params:
+                torch.nn.utils.clip_grad_norm_([p], cfg.CLIP_VALUE, norm_type=norm_type)
+        elif clip_type == "value":
+            torch.nn.utils.clip_grad_value_(params, cfg.CLIP_VALUE)
+        elif clip_type is not None:
+            raise ValueError(f"Unknown SOLVER.CLIP_GRADIENTS.CLIP_TYPE: {clip_type}")
+        return total_norm
+
+    def run_step(self):
+        assert self.model.training, "[GradAccumClipTrainer] model was changed to eval mode!"
+        start = time.perf_counter()
+        data = next(self._data_loader_iter)
+        data_time = time.perf_counter() - start
+
+        is_step = self._is_last_micro_step()
+        # With DDP, skip the gradient all-reduce on micro-batches that don't step.
+        sync_ctx = (
+            self.model.no_sync()
+            if not is_step and isinstance(self.model, torch.nn.parallel.DistributedDataParallel)
+            else contextlib.nullcontext()
+        )
+        amp_ctx = (
+            torch.autocast(device_type="cuda", dtype=self.amp_dtype)
+            if self.amp
+            else contextlib.nullcontext()
+        )
+
+        with sync_ctx:
+            with amp_ctx:
+                loss_dict = self.model(data)
+                if isinstance(loss_dict, torch.Tensor):
+                    losses = loss_dict
+                    loss_dict = {"total_loss": loss_dict}
+                else:
+                    losses = sum(loss_dict.values())
+            losses = losses / self.accum_steps
+            if self.grad_scaler is not None:
+                self.grad_scaler.scale(losses).backward()
+            else:
+                losses.backward()
+
+        # logs the unscaled per-micro-batch losses, as before
+        self._write_metrics(loss_dict, data_time)
+
+        if not is_step:
+            self._micro_step += 1
+            return
+
+        if self.grad_scaler is not None:
+            self.grad_scaler.unscale_(self.optimizer)  # clip on real gradient values
+        grad_norm = self._clip_gradients()
+        if self.grad_scaler is not None:
+            self.grad_scaler.step(self.optimizer)  # skips the step on inf/nan grads
+            self.grad_scaler.update()
+        else:
+            self.optimizer.step()
+        self.optimizer.zero_grad(set_to_none=True)
+        self._micro_step = 0
+
+        if comm.is_main_process():
+            storage = get_event_storage()
+            if grad_norm is not None:
+                storage.put_scalar("grad_norm", float(grad_norm), smoothing_hint=False)
+            if self.grad_scaler is not None:
+                storage.put_scalar("grad_scaler", self.grad_scaler.get_scale(), smoothing_hint=False)
+
+    def state_dict(self):
+        ret = super().state_dict()
+        if self.grad_scaler is not None:
+            ret["grad_scaler"] = self.grad_scaler.state_dict()
+        return ret
+
+    def load_state_dict(self, state_dict):
+        super().load_state_dict(state_dict)
+        if self.grad_scaler is not None and "grad_scaler" in state_dict:
+            self.grad_scaler.load_state_dict(state_dict["grad_scaler"])
+
+
 class Trainer(DefaultTrainer):
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        # Replace detectron2's SimpleTrainer / AMPTrainer with one that supports
+        # gradient accumulation and clipping. Model (possibly DDP-wrapped), data loader
+        # and optimizer are reused, so checkpointing / hooks keep working unchanged.
+        inner = self._trainer
+        self._trainer = GradAccumClipTrainer(
+            inner.model,
+            inner.data_loader,
+            inner.optimizer,
+            accum_steps=get_grad_accum_steps(),
+            clip_cfg=cfg.SOLVER.CLIP_GRADIENTS,
+            amp=cfg.SOLVER.AMP.ENABLED,
+            amp_precision=cfg.SOLVER.AMP.get("PRECISION", "float16"),
+        )
+        # DefaultTrainer only sets max_iter on itself; the inner trainer needs it to
+        # flush a partial accumulation window on the last iteration.
+        self._trainer.max_iter = self.max_iter
+
     def build_writers(self):
         writers = super().build_writers()
         # use wandb writer instead.
@@ -117,82 +277,63 @@ class Trainer(DefaultTrainer):
 
     @classmethod
     def build_optimizer(cls, cfg, model):
-        token_params = [
-            param
+        # ONLY optimize the learnable tokens. Gradient clipping is NOT done here (via an
+        # optimizer wrapper) but in GradAccumClipTrainer.run_step, because it has to run
+        # once per optimizer step on the accumulated, AMP-unscaled gradients.
+        named_params = [
+            (name, param)
             for name, param in model.named_parameters()
             if "learnable_token" in name and param.requires_grad
         ]
+        assert len(named_params) > 0, "No trainable learnable_token parameter found."
 
-        # assert len(token_params) > 0, \
-        #     "No trainable learnable_token parameter found."
-
-        # TODO
-        optimizer = torch.optim.AdamW(
-            token_params,
-            lr=cfg.SOLVER.BASE_LR,
-            weight_decay=cfg.SOLVER.WEIGHT_DECAY,
-        )
-
-        return optimizer
-
-        def maybe_add_full_model_gradient_clipping(optim):
-            # detectron2 doesn't have full model gradient clipping now
-            clip_norm_val = cfg.SOLVER.CLIP_GRADIENTS.CLIP_VALUE
-            enable = (
-                cfg.SOLVER.CLIP_GRADIENTS.ENABLED
-                and cfg.SOLVER.CLIP_GRADIENTS.CLIP_TYPE == "full_model"
-                and clip_norm_val > 0.0
-            )
-
-            class FullModelGradientClippingOptimizer(optim):
-                def step(self, closure=None):
-                    all_params = itertools.chain(
-                        *[x["params"] for x in self.param_groups]
-                    )
-                    torch.nn.utils.clip_grad_norm_(all_params, clip_norm_val)
-                    super().step(closure=closure)
-
-            return FullModelGradientClippingOptimizer if enable else optim
-
+        params = [p for _, p in named_params]
         optimizer_type = cfg.SOLVER.OPTIMIZER
         if optimizer_type == "SGD":
-            optimizer = maybe_add_full_model_gradient_clipping(torch.optim.SGD)(
-                params, cfg.SOLVER.BASE_LR, momentum=cfg.SOLVER.MOMENTUM
+            optimizer = torch.optim.SGD(
+                params,
+                lr=cfg.SOLVER.BASE_LR,
+                momentum=cfg.SOLVER.MOMENTUM,
+                weight_decay=cfg.SOLVER.WEIGHT_DECAY,
             )
         elif optimizer_type == "ADAMW":
-            optimizer = maybe_add_full_model_gradient_clipping(torch.optim.AdamW)(
-                params, cfg.SOLVER.BASE_LR
+            optimizer = torch.optim.AdamW(
+                params,
+                lr=cfg.SOLVER.BASE_LR,
+                weight_decay=cfg.SOLVER.WEIGHT_DECAY,
             )
         else:
             raise NotImplementedError(f"no optimizer type {optimizer_type}")
-        if not cfg.SOLVER.CLIP_GRADIENTS.CLIP_TYPE == "full_model":
-            optimizer = maybe_add_gradient_clipping(cfg, optimizer)
-        # display the lr and wd of each param group in a table
+
+        # display the trainable params and the optimizer settings
         optim_info = defaultdict(list)
         total_params_size = 0
-        for group in optimizer.param_groups:
-            optim_info["Param Name"].append(group["param_name"])
-            optim_info["Param Shape"].append(
-                "X".join([str(x) for x in list(group["params"][0].shape)])
-            )
-            total_params_size += group["params"][0].numel()
-            optim_info["Lr"].append(group["lr"])
-            optim_info["Wd"].append(group["weight_decay"])
-        # Counting the number of parameters
+        for name, param in named_params:
+            optim_info["Param Name"].append(name)
+            optim_info["Param Shape"].append("X".join(str(x) for x in param.shape))
+            total_params_size += param.numel()
         optim_info["Param Name"].append("Total")
-        optim_info["Param Shape"].append("{:.2f}M".format(total_params_size / 1e6))
-        optim_info["Lr"].append("-")
-        optim_info["Wd"].append("-")
+        optim_info["Param Shape"].append("{:,}".format(total_params_size))
         table = tabulate(
             list(zip(*optim_info.values())),
             headers=optim_info.keys(),
             tablefmt="grid",
-            floatfmt=".2e",
             stralign="center",
-            numalign="center",
         )
+        clip = cfg.SOLVER.CLIP_GRADIENTS
         logger = logging.getLogger("san")
-        logger.info("Optimizer Info:\n{}\n".format(table))
+        logger.info(
+            "Optimizer: {} (lr={:.2e}, wd={:.2e}), grad accumulation: {}, grad clipping: {}\n{}\n".format(
+                optimizer_type,
+                cfg.SOLVER.BASE_LR,
+                cfg.SOLVER.WEIGHT_DECAY,
+                get_grad_accum_steps(),
+                "{} {} (norm_type={})".format(clip.CLIP_TYPE, clip.CLIP_VALUE, clip.NORM_TYPE)
+                if clip.ENABLED
+                else "off",
+                table,
+            )
+        )
         return optimizer
 
     @classmethod

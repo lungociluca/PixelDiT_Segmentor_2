@@ -71,6 +71,8 @@ timestep = 0.002
 extra_labels_count = 2
 select_labels_count = 5
 
+# Micro-batches (of SOLVER.IMS_PER_BATCH images) summed per optimizer step, used by train_net.py.
+# Effective batch = IMS_PER_BATCH * grad_accumulation * num_gpus. SOLVER.MAX_ITER counts micro-batches.
 grad_accumulation = 8
 
 no_leanable_tokens = 1
