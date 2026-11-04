@@ -368,7 +368,7 @@ class PixDiT_T2I(nn.Module):
             raise ValueError("Text embedding y must be [B, L, D]")
         Ltxt = min(y.shape[1], max(1, self.txt_max_length - 1))
         y = y[:, :Ltxt, :]
-        y_emb = self.y_embedder(y.to(local_config.device, dtype=x.dtype)).view(B, Ltxt, self.hidden_size)
+        y_emb = self.y_embedder(y.to(local_config.device, dtype=x.dtype)).view(1, Ltxt, self.hidden_size).expand((B, -1, -1))
         y_emb = y_emb + self.y_pos_embedding[:, :Ltxt, :].to(y_emb.dtype)
 
         condition = torch.nn.functional.silu(t_emb)

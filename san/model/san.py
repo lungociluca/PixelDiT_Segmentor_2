@@ -129,7 +129,7 @@ def get_model():
         del state_dict["state_dict"]["pos_embed"]
 
     missing, unexpected = model.load_state_dict(state_dict["state_dict"], strict=False)
-    return model.eval().to(torch.bfloat16), tokenizer, text_encoder.eval()
+    return model.eval().to(torch.float32), tokenizer, text_encoder.eval()
 
 
 @META_ARCH_REGISTRY.register()
@@ -152,7 +152,7 @@ class SAN(nn.Module):
         self.clean_labels = [x for x in self.labels if x != "unknown"]
         
         self.emb, self.emb_mask, self.tokens_count = self.precompute_prompts()
-        self.emb = self.emb.to(torch.bfloat16)
+        self.emb = self.emb.to(torch.float32)
         
         del self.tokenizer
         del self.text_encoder
@@ -160,7 +160,7 @@ class SAN(nn.Module):
         self.learnable_token_norm_weights = torch.nn.LayerNorm(local_config.no_vision_learnable_tokens)
         if local_config.use_learned_tokens:
             self.learnable_token_norm_weights.load_state_dict(torch.load("norm_weights.pt", weights_only=True))
-            self.learnable_token_norm_weights = self.learnable_token_norm_weights.to(torch.bfloat16)
+            self.learnable_token_norm_weights = self.learnable_token_norm_weights
         self.learnable_token_norm_weights.to(local_config.device)
 
         if local_config.use_learned_tokens:
@@ -233,12 +233,12 @@ class SAN(nn.Module):
         caption_embs_list = [self.text_encoder(caption_token.input_ids[[i]], caption_token.attention_mask[[i]])[0][:, None][
             :, :, select_index
         ] for i in range(caption_token.input_ids.shape[0])]
-        caption_embs = torch.cat(caption_embs_list, dim=0).cpu()
+        caption_embs = torch.cat(caption_embs_list, dim=0)
         tokens_count = caption_token.attention_mask.sum(dim=-1)
         emb_masks = caption_token.attention_mask[:, select_index]
         return caption_embs, emb_masks, tokens_count
     
-    def run_diffusion_model(self, image, target_labels, segment_data):
+    def run_diffusion_model(self, image, segment_data):
         # TODO
         emb = self.emb[-1].unsqueeze(0)
         emb_mask = self.emb_mask[-1].unsqueeze(0)
@@ -257,47 +257,62 @@ class SAN(nn.Module):
         )
 
         samples = dpm_solver.segment(
-            image.unsqueeze(0),
+            image,
             segment_data
         )
 
-    def call_model(self, file_id, image_tensor, label_indexes, target_labels, gt_ids, original_shape, gt):
-        segment_data = {"labels": target_labels, "img_id": file_id, "label_ids": label_indexes, \
-            "gt_ids": gt_ids, "targets": target_labels, "gt": gt}
+    @staticmethod
+    def clasify_masks(visual_tokens, language_tokens, language_weights, language_no_object):
+        # WARNING: language_tokens are kept on CPU
+        # visual_tokens -> (l, d), language_tokens -> (t,d)
+        B = visual_tokens.shape[0]
+        visual_tokens = visual_tokens.sum(dim=1) # sum across layers TODO: try other ways of aggregating visual features for comparison with language
+        language_tokens_selected = language_tokens[:171]
+        language_targets = language_weights * language_tokens_selected
+        language_targets = language_targets.sum(dim=-2)
+        language_targets = torch.cat([language_targets, language_no_object[None,:,:]], dim=0).permute(1,2,0).expand(B, -1, -1)
+        visual_tokens = visual_tokens.permute(0,2,1)
+        my_norm = lambda x,d: torch.nn.functional.normalize(x, dim=d)
+        classes = my_norm(visual_tokens, 1).permute(0,2,1) @ my_norm(language_targets, 1)
+        return classes
+    
+    def call_model(self, image_tensor):
+        segment_data = {}
         with torch.enable_grad():
-            self.run_diffusion_model(image_tensor, target_labels, segment_data)
+            self.run_diffusion_model(image_tensor, segment_data)
         
         visual_features = segment_data["all_vision_features"]
         vl_features = segment_data["vl_learned"]
+
         learned_vision = visual_features[:,:,:local_config.no_vision_learnable_tokens,:]
         dense_vision = visual_features[:,:,local_config.no_vision_learnable_tokens:,:]
         h, w = segment_data["hw"]
-        prediction = None
-        loss = None
-        dice_loss = None
-        if local_config.save_learned_tokens:
-            with torch.enable_grad():
-                prediction, loss, dice_loss = compute_masks_utils.compute_loss(dense_vision, learned_vision, vl_features, self.emb, self.learnable_token_norm_weights, self.learnable_token_language_weights.weight, self.learnable_token_language_no_object.weight, gt, label_indexes, h, w)
-        else:
-            prediction = compute_masks_utils.compute_masks(dense_vision, learned_vision, vl_features, self.emb, self.learnable_token_norm_weights,  self.learnable_token_language_weights.weight, self.learnable_token_language_no_object.weight,label_indexes)
-            prediction = prediction.view(1, 171, h, w)
-        return prediction, loss, dice_loss
 
-    def single_batch(self, file_id, image_tensor, label_indexes, target_labels, gt_ids, original_shape, gt):
-        return self.call_model(file_id, image_tensor, label_indexes, target_labels, gt_ids, original_shape, gt)
+        my_norm = lambda x: x if not local_config.norm_before_dot else torch.nn.functional.normalize(x, dim=-1)
+        mask_pred = my_norm(dense_vision) @ my_norm(learned_vision).permute(0, 1, 3, 2)
 
-    def single_class(self, file_id, image_tensor, label_indexes, target_labels, gt_ids, original_shape, gt):
-        prediction, loss, loss_dice = self.call_model(file_id, image_tensor, label_indexes, target_labels, gt_ids, original_shape, gt)
+        # masks (b, l, p, t) * (b, l, 1, t)
+        # weighted sum to aggregate masks of all layers
+        mask_pred = self.learnable_token_norm_weights(mask_pred)
+        mask_pred = mask_pred.sum(dim=1)
+
+        mask_logits = SAN.clasify_masks(vl_features, self.emb, self.learnable_token_language_weights.weight, self.learnable_token_language_no_object.weight)
+        B, P, L = mask_pred.shape
+        return mask_logits, mask_pred.permute(0, 2, 1).view(B, L, h, w)
 
     def forward(self, batched_inputs):
         images = [x["image"].to(local_config.device).float() / 255.0 for x in batched_inputs]
         images = [x * 2 - 1 for x in images]
-        images = ImageList.from_tensors(images, self.size_divisibility)
+        images = ImageList.from_tensors(
+            images,
+            self.size_divisibility,
+            pad_value=-1.0,
+            padding_constraints={"square_size": 1024},   # recent detectron2 versions
+        )
         images_tensor = images.tensor
-        print("image tensor stats", images_tensor.shape, images_tensor.min(), images_tensor.max(), images_tensor.mean())
-
-        mask_preds = None
-        mask_logits = None
+        # print("image tensor stats", images_tensor.shape, images_tensor.min(), images_tensor.max(), images_tensor.mean())
+        # print("ids",  [x["file_name"]for x in batched_inputs])
+        mask_logits, mask_preds = self.call_model(images_tensor)
         if self.training:
             if "instances" in batched_inputs[0]:
                 gt_instances = [x["instances"].to(local_config.device) for x in batched_inputs]
@@ -305,19 +320,19 @@ class SAN(nn.Module):
             else:
                 targets = None
             outputs = {
-                "pred_logits": mask_logits[-1],
-                "pred_masks": mask_preds[-1],
-                "aux_outputs": [
-                    {
-                        "pred_logits": aux_pred_logits,
-                        "pred_masks": aux_pred_masks,
-                    }
-                    for aux_pred_logits, aux_pred_masks in zip(
-                        mask_logits[:-1], mask_preds[:-1]
-                    )
-                ],
+                "pred_logits": mask_logits,
+                "pred_masks": mask_preds,
+                # "aux_outputs": [
+                #     {
+                #         "pred_logits": aux_pred_logits,
+                #         "pred_masks": aux_pred_masks,
+                #     }
+                #     for aux_pred_logits, aux_pred_masks in zip(
+                #         mask_logits[:-1], mask_preds[:-1]
+                #     )
+                # ],
             }
-            # bipartite matching-based loss
+
             losses = self.criterion(outputs, targets)
 
             for k in list(losses.keys()):
@@ -328,8 +343,8 @@ class SAN(nn.Module):
                     losses.pop(k)
             return losses
         else:
-            mask_preds = mask_preds[-1]
-            mask_logits = mask_logits[-1]
+            # mask_preds = mask_preds[-1]
+            # mask_logits = mask_logits[-1]
             # torch.cuda.empty_cache()
             # Inference
             mask_preds = F.interpolate(

@@ -2,9 +2,9 @@ DATASETS:
   TRAIN: ("coco_2017_train_stuff_sem_seg",)
   TEST: ('coco_2017_test_stuff_sem_seg',) # ('coco_2017_test_stuff_sem_seg', 'voc_sem_seg_val','pcontext_sem_seg_val','ade20k_sem_seg_val','pcontext_full_sem_seg_val','ade20k_full_sem_seg_val')
 SOLVER:
-  IMS_PER_BATCH: 1
+  IMS_PER_BATCH: 8
   BASE_LR: 0.0001
-  MAX_ITER: 3
+  MAX_ITER: 2
   WARMUP_FACTOR: 1.0
   WARMUP_ITERS: 0
   WEIGHT_DECAY: 0.0001
@@ -34,12 +34,12 @@ INPUT:
   FORMAT: "RGB"
   DATASET_MAPPER_NAME: "mask_former_semantic"
 TEST:
-  EVAL_PERIOD: 5
+  EVAL_PERIOD: 50
   AUG:
     ENABLED: False
     MIN_SIZES: [1024, 1280, 1536]
     MAX_SIZE: 6144
-    FLIP: True
+    FLIP: False
 DATALOADER:
   FILTER_EMPTY_ANNOTATIONS: True
   NUM_WORKERS: 4
