@@ -249,11 +249,20 @@ class SAN(nn.Module):
         del self.tokenizer
         del self.text_encoder
 
-        self.learnable_token_norm_weights = torch.nn.LayerNorm(local_config.no_vision_learnable_tokens)
+        # Per-layer scale and bias that turn the cosine similarities of each block into mask
+        # logits before summing over blocks. This replaces the old LayerNorm over the query
+        # dimension, which normalized across queries at every pixel and coupled the masks.
+        num_mask_layers = len(self.model.core.patch_blocks)
+        init_scale = getattr(local_config, "mask_logit_init_scale", 5.0)
         if local_config.use_learned_tokens:
-            self.learnable_token_norm_weights.load_state_dict(torch.load("norm_weights.pt", weights_only=True))
-            self.learnable_token_norm_weights = self.learnable_token_norm_weights
-        self.learnable_token_norm_weights.to(local_config.device)
+            mask_layer_state = torch.load("learnable_token_mask_layer.pt", map_location=local_config.device, weights_only=True)
+            scale, bias = mask_layer_state["scale"], mask_layer_state["bias"]
+            assert scale.numel() == num_mask_layers, "learnable_token_mask_layer.pt was saved with a different layer_count"
+        else:
+            scale = torch.full((num_mask_layers,), float(init_scale), device=local_config.device)
+            bias = torch.zeros(num_mask_layers, device=local_config.device)
+        self.learnable_token_mask_layer_scale = nn.Parameter(scale.float(), requires_grad=local_config.save_learned_tokens)
+        self.learnable_token_mask_layer_bias = nn.Parameter(bias.float(), requires_grad=local_config.save_learned_tokens)
 
         # The class targets are now fixed text embeddings, so there are no learned
         # per-position language weights anymore. Only the "no object" target is learned.
@@ -278,7 +287,13 @@ class SAN(nn.Module):
 
     def save_learned_weights(self):
         """Save the SAN-level learned weights (PixelDiT blocks save their own in __del__)."""
-        torch.save(self.learnable_token_norm_weights.state_dict(), "norm_weights.pt")
+        torch.save(
+            {
+                "scale": self.learnable_token_mask_layer_scale.detach().cpu(),
+                "bias": self.learnable_token_mask_layer_bias.detach().cpu(),
+            },
+            "learnable_token_mask_layer.pt",
+        )
         torch.save(self.learnable_token_language_no_object, "learnable_token_language_no_object.pt")
         torch.save(self.learnable_token_logit_scale.detach().cpu(), "learnable_token_logit_scale.pt")
 
@@ -504,10 +519,10 @@ class SAN(nn.Module):
         my_norm = lambda x: x if not local_config.norm_before_dot else torch.nn.functional.normalize(x, dim=-1)
         mask_pred = my_norm(dense_vision) @ my_norm(learned_vision).permute(0, 1, 3, 2)
 
-        # masks (b, l, p, t) * (b, l, 1, t)
-        # weighted sum to aggregate masks of all layers
-        mask_pred = self.learnable_token_norm_weights(mask_pred)
-        mask_pred = mask_pred.sum(dim=1)
+        # mask_pred: (b, l, p, q). Per-layer affine map to logits, then sum over layers.
+        scale = self.learnable_token_mask_layer_scale.view(1, -1, 1, 1).to(mask_pred.dtype)
+        bias = self.learnable_token_mask_layer_bias.view(1, -1, 1, 1).to(mask_pred.dtype)
+        mask_pred = (mask_pred * scale + bias).sum(dim=1)
 
         mask_logits = SAN.clasify_masks(
             vl_features,
@@ -522,11 +537,13 @@ class SAN(nn.Module):
     def forward(self, batched_inputs):
         images = [x["image"].to(local_config.device).float() / 255.0 for x in batched_inputs]
         images = [x * 2 - 1 for x in images]
+        # Pad only to a multiple of the patch size. A fixed "square_size" would crop any
+        # image larger than it (negative padding) and sem_seg_postprocess would then stretch
+        # the cropped prediction back to the full image size at evaluation.
         images = ImageList.from_tensors(
             images,
             self.size_divisibility,
             pad_value=-1.0,
-            padding_constraints={"square_size": 1024},   # recent detectron2 versions
         )
         images_tensor = images.tensor
         # print("image tensor stats", images_tensor.shape, images_tensor.min(), images_tensor.max(), images_tensor.mean())

@@ -89,6 +89,8 @@ use_vision_attention_bias = False
 use_vision_mlp = True
 use_text_mlp = False
 norm_before_dot = True
+# Initial per-layer scale for mask cosine similarities -> logits (summed over layer_count layers).
+mask_logit_init_scale = 5.0
 
 crop_size = None
 compute_model_vectors = False
