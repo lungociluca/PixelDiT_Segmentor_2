@@ -53,6 +53,18 @@ class_prompt_template = "a photo of a {target}."
 class_emb_pooling = "class_tokens"   # or "all_tokens"
 class_emb_centering = "train"        # or "dataset", "none"
 debug_class_similarity = False
+# Where the class targets come from:
+#   "first_layer_qkv": Q, K, V of the first PixelDiT attention block's text stream, for the class
+#                      prompt, at `timestep` (all three are stored; see class_emb_qkv_target).
+#   "gemma":           pooled Gemma hidden states (the previous behaviour).
+# Changing this changes the width of learnable_token_vl_mlp / no_object, so retrain the tokens.
+class_emb_source = "first_layer_qkv"
+# Which of the stored Q/K/V the vision-language features are compared with:
+# "q", "k", "v", or a concatenation such as "kv" / "qkv" (width = 1536 per component).
+class_emb_qkv_target = "k"
+# Apply the text RoPE to Q and K before pooling (the diffusion model applies it before attention).
+# Off by default: rotating by position makes the pooled vector depend on where the class name sits.
+class_emb_qkv_rope = False
 
 device = "cuda"
 eval_dataset = EvalDataset.COCO

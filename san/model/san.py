@@ -50,6 +50,20 @@ CLASS_EMB_CENTERING = getattr(local_config, "class_emb_centering", "train")
 # Log pairwise-similarity stats of the class targets (and of the old long-prompt targets
 # for comparison) when the model is built.
 DEBUG_CLASS_SIMILARITY = getattr(local_config, "debug_class_similarity", False)
+# "first_layer_qkv": store Q, K, V of the first diffusion block's text stream per class.
+# "gemma":           store pooled Gemma hidden states per class.
+CLASS_EMB_SOURCE = getattr(local_config, "class_emb_source", "gemma")
+# Which stored component(s) the classifier compares against, e.g. "k" or "qkv".
+CLASS_EMB_QKV_TARGET = getattr(local_config, "class_emb_qkv_target", "k")
+CLASS_EMB_QKV_ROPE = getattr(local_config, "class_emb_qkv_rope", False)
+
+if CLASS_EMB_SOURCE == "first_layer_qkv":
+    CLASS_EMB_COMPONENTS = ("q", "k", "v")
+    CLASS_EMB_TARGET = tuple(CLASS_EMB_QKV_TARGET)
+elif CLASS_EMB_SOURCE == "gemma":
+    CLASS_EMB_COMPONENTS = CLASS_EMB_TARGET = ("gemma",)
+else:
+    raise ValueError(f"Unknown class_emb_source: {CLASS_EMB_SOURCE}")
 
 
 def get_dataset_labels(dataset_name: str) -> List[str]:
@@ -202,9 +216,12 @@ class SAN(nn.Module):
         # ------------------------------------------------------------------
         self.default_dataset = train_dataset_names[0]
         self.class_labels: Dict[str, List[str]] = {}
-        self.class_embs: Dict[str, torch.Tensor] = {}   # dataset_name -> (C, D), centered
-        pooled_by_label: Dict[str, torch.Tensor] = {}    # label -> (D,), unit norm, uncentered
-        raw_embs: Dict[str, torch.Tensor] = {}
+        # dataset_name -> {component: (C, D)}, centered. With class_emb_source="first_layer_qkv"
+        # the components are "q", "k", "v" from the first diffusion block; otherwise "gemma".
+        self.class_text_features: Dict[str, Dict[str, torch.Tensor]] = {}
+        self.class_embs: Dict[str, torch.Tensor] = {}   # dataset_name -> (C, D) classifier target
+        pooled_by_label: Dict[str, Dict[str, torch.Tensor]] = {}  # label -> {component: (D,)}, unit norm, uncentered
+        raw_embs: Dict[str, Dict[str, torch.Tensor]] = {}
 
         all_names = list(dict.fromkeys(list(train_dataset_names) + list(test_dataset_names)))
         for name in all_names:
@@ -212,30 +229,40 @@ class SAN(nn.Module):
             missing = [c for c in dict.fromkeys(labels) if c not in pooled_by_label]
             if missing:
                 new = self.embed_class_names(missing)
-                pooled_by_label.update(zip(missing, new))
+                for j, c in enumerate(missing):
+                    pooled_by_label[c] = {comp: feats[j] for comp, feats in new.items()}
             self.class_labels[name] = labels
-            raw_embs[name] = torch.stack([pooled_by_label[c] for c in labels])
+            raw_embs[name] = {
+                comp: torch.stack([pooled_by_label[c][comp] for c in labels]) for comp in CLASS_EMB_COMPONENTS
+            }
 
-        # Remove the component shared by all classes (template words, Gemma's
-        # outlier dimensions) so cosine similarity reflects class differences.
-        if CLASS_EMB_CENTERING == "train":
-            train_labels = list(dict.fromkeys(c for n in train_dataset_names for c in self.class_labels[n]))
-            train_mean = torch.stack([pooled_by_label[c] for c in train_labels]).mean(dim=0)
-            for name in all_names:
-                self.class_embs[name] = raw_embs[name] - train_mean
-        elif CLASS_EMB_CENTERING == "dataset":
-            for name in all_names:
-                e = raw_embs[name]
-                self.class_embs[name] = e - e.mean(dim=0, keepdim=True) if e.shape[0] > 1 else e
-        elif CLASS_EMB_CENTERING == "none":
-            self.class_embs = dict(raw_embs)
-        else:
-            raise ValueError(f"Unknown class_emb_centering: {CLASS_EMB_CENTERING}")
-        self.class_embs = {k: v.to(local_config.device) for k, v in self.class_embs.items()}
+        # Remove the component shared by all classes (template words, outlier dimensions)
+        # so cosine similarity reflects class differences. Done separately for Q, K and V.
+        train_labels = list(dict.fromkeys(c for n in train_dataset_names for c in self.class_labels[n]))
+        for name in all_names:
+            self.class_text_features[name] = {}
+            for comp in CLASS_EMB_COMPONENTS:
+                e = raw_embs[name][comp]
+                if CLASS_EMB_CENTERING == "train":
+                    e = e - torch.stack([pooled_by_label[c][comp] for c in train_labels]).mean(dim=0)
+                elif CLASS_EMB_CENTERING == "dataset":
+                    e = e - e.mean(dim=0, keepdim=True) if e.shape[0] > 1 else e
+                elif CLASS_EMB_CENTERING != "none":
+                    raise ValueError(f"Unknown class_emb_centering: {CLASS_EMB_CENTERING}")
+                self.class_text_features[name][comp] = e.to(local_config.device)
+            self.class_embs[name] = torch.cat(
+                [self.class_text_features[name][comp] for comp in CLASS_EMB_TARGET], dim=-1
+            )
         emb_dim = next(iter(self.class_embs.values())).shape[-1]
+        expected_dim = self.model.core.patch_blocks[0].attn.learnable_token_vl_mlp[-1].out_features
+        assert emb_dim == expected_dim, (
+            f"Class target width {emb_dim} != learnable_token_vl_mlp output {expected_dim}; "
+            "check class_emb_source / class_emb_qkv_target in t2i/config.py"
+        )
 
         logger.info(
-            f"Class embeddings: template={CLASS_PROMPT_TEMPLATE!r}, pooling={CLASS_EMB_POOLING}, "
+            f"Class embeddings: source={CLASS_EMB_SOURCE}, target={'+'.join(CLASS_EMB_TARGET)}, "
+            f"template={CLASS_PROMPT_TEMPLATE!r}, pooling={CLASS_EMB_POOLING}, "
             f"centering={CLASS_EMB_CENTERING}, dim={emb_dim}"
         )
         for name in all_names:
@@ -244,7 +271,8 @@ class SAN(nn.Module):
         if DEBUG_CLASS_SIMILARITY:
             # Compare against the old long-prompt targets for the smallest dataset.
             small = min(all_names, key=lambda n: len(self.class_labels[n]))
-            self._debug_compare_with_legacy_targets(small, raw_embs[small])
+            raw_target = torch.cat([raw_embs[small][comp] for comp in CLASS_EMB_TARGET], dim=-1)
+            self._debug_compare_with_legacy_targets(small, raw_target)
 
         del self.tokenizer
         del self.text_encoder
@@ -348,14 +376,32 @@ class SAN(nn.Module):
     # ------------------------------------------------------------------
     # Class embeddings
     # ------------------------------------------------------------------
-    @torch.no_grad()
-    def embed_class_names(self, labels: List[str]) -> torch.Tensor:
-        """Embed each class with a short prompt and mean-pool its hidden states.
+    @staticmethod
+    def segmentation_model_time() -> torch.Tensor:
+        """The timestep the PixelDiT core sees during segmentation.
 
-        Returns (C, D) float32, each row L2-normalized (before centering), so classes
-        with longer names or larger activations don't dominate the class mean.
+        Mirrors DPM_Solver_Wrapper.segment (bf16 local_config.timestep) followed by the flow
+        model wrapper's get_model_input_time (t_continuous * total_N, total_N = 1000).
+        """
+        t = torch.tensor(local_config.timestep, device=local_config.device, dtype=torch.bfloat16)
+        return t * 1000
+
+    @torch.no_grad()
+    def embed_class_names(self, labels: List[str]) -> Dict[str, torch.Tensor]:
+        """Embed each class with a short prompt and mean-pool over its tokens.
+
+        With class_emb_source="gemma" the pooled features are Gemma's hidden states.
+        With "first_layer_qkv" the Gemma hidden states of the prompt are passed through the
+        frozen diffusion model's text path up to the first attention block (y_embedder,
+        position embedding, adaLN at the segmentation timestep, qkv_y, per-head Q/K norm),
+        and its Q, K and V are pooled. Prompt token i sits at text position i, as in the
+        model's conditioning sequence (BOS at position 0).
+
+        Returns {component: (C, D)} float32, each row L2-normalized (before centering), so
+        classes with longer names or larger activations don't dominate the class mean.
         No padding is involved: every prompt is encoded on its own.
         """
+        model_time = SAN.segmentation_model_time() if CLASS_EMB_SOURCE == "first_layer_qkv" else None
         logger = get_root_logger()
         template = CLASS_PROMPT_TEMPLATE
         assert template.count("{target}") == 1, "class_prompt_template must contain {target} once"
@@ -365,7 +411,7 @@ class SAN(nn.Module):
             logger.warning("Tokenizer has no offset mapping; pooling over all tokens instead of class tokens.")
         bos_id = getattr(self.tokenizer, "bos_token_id", None)
 
-        out = []
+        out = {comp: [] for comp in CLASS_EMB_COMPONENTS}
         for c in labels:
             prompt = template.format(target=c)
             span = (name_start, name_start + len(c))
@@ -387,8 +433,17 @@ class SAN(nn.Module):
                 else:
                     logger.warning(f"No tokens found for class name {c!r}; pooling over all tokens.")
 
-            out.append(hidden[keep].mean(dim=0))
-        return F.normalize(torch.stack(out), dim=-1)
+            if CLASS_EMB_SOURCE == "gemma":
+                out["gemma"].append(hidden[keep].mean(dim=0))
+            else:
+                # Every token of the prompt goes in, so positions match the conditioning layout;
+                # only the kept (class-name) tokens are pooled.
+                q, k, v = self.model.core.first_layer_text_qkv(
+                    hidden[None], model_time, apply_rope=CLASS_EMB_QKV_ROPE
+                )  # each (L, heads, head_dim)
+                for comp, feats in zip(("q", "k", "v"), (q, k, v)):
+                    out[comp].append(feats.float().flatten(1)[keep].mean(dim=0))
+        return {comp: F.normalize(torch.stack(feats), dim=-1) for comp, feats in out.items()}
 
     @staticmethod
     def similarity_stats(targets: torch.Tensor):

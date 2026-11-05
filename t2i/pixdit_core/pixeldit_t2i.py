@@ -18,6 +18,26 @@ from .modules import (
 
 import t2i.config as local_config
 
+QKV_COMPONENTS = ("q", "k", "v")
+
+
+def language_target_dim(hidden_size: int, txt_embed_dim: int) -> int:
+    """Width of the class targets the vision-language features are compared with.
+
+    "gemma": pooled Gemma hidden states (txt_embed_dim).
+    "first_layer_qkv": Q, K and/or V of the first block's text stream (hidden_size each).
+    """
+    source = getattr(local_config, "class_emb_source", "gemma")
+    if source == "gemma":
+        return txt_embed_dim
+    if source == "first_layer_qkv":
+        target = getattr(local_config, "class_emb_qkv_target", "k")
+        if not target or any(c not in QKV_COMPONENTS for c in target) or len(set(target)) != len(target):
+            raise ValueError(f"class_emb_qkv_target must be a combination of 'q', 'k', 'v', got {target!r}")
+        return hidden_size * len(target)
+    raise ValueError(f"Unknown class_emb_source: {source!r}")
+
+
 class MMDiTJointAttention(nn.Module):
     def __init__(
             self,
@@ -26,8 +46,8 @@ class MMDiTJointAttention(nn.Module):
             qkv_bias: bool = False,
             attn_drop: float = 0.,
             proj_drop: float = 0.,
-            block_id: int = -1
-
+            block_id: int = -1,
+            language_dim: int = 2304,
     ) -> None:
         super().__init__()
         assert dim % num_heads == 0, 'dim should be divisible by num_heads'
@@ -66,9 +86,9 @@ class MMDiTJointAttention(nn.Module):
                 torch.nn.GELU(),
                 torch.nn.Linear(dim, dim * 2),
                 torch.nn.GELU(),
-                torch.nn.Linear(dim * 2, 2304),
+                torch.nn.Linear(dim * 2, language_dim),
                 # No final Tanh: these features are compared by cosine similarity with centered
-                # Gemma class embeddings, so a bounded output only restricts reachable directions.
+                # class embeddings, so a bounded output only restricts reachable directions.
             )
 
         if local_config.use_learned_tokens:
@@ -86,6 +106,22 @@ class MMDiTJointAttention(nn.Module):
         
         with open(local_config.ds_config_path) as f:
             self.labels = json.load(f)
+
+    def text_qkv(self, y: torch.Tensor, pos_txt: torch.Tensor = None):
+        """Q, K, V of the text stream, computed exactly as in forward().
+
+        y: (B, Ny, C), the adaLN-modulated text tokens this block receives.
+        Returns q, k, v of shape (B, Ny, num_heads, head_dim). Q and K have the per-head
+        RMSNorm applied, and RoPE too when pos_txt is given; V is the raw projection.
+        """
+        B, Ny, C = y.shape
+        qkv_y = self.qkv_y(y).reshape(B, Ny, 3, self.num_heads, C // self.num_heads).permute(2, 0, 1, 3, 4)
+        qy, ky, vy = qkv_y[0], qkv_y[1], qkv_y[2]
+        qy = self.q_norm_y(qy)
+        ky = self.k_norm_y(ky)
+        if pos_txt is not None:
+            qy, ky = apply_rotary_emb(qy, ky, freqs_cis=pos_txt)
+        return qy, ky, vy
 
     def forward(
             self,
@@ -135,15 +171,10 @@ class MMDiTJointAttention(nn.Module):
         qx = self.q_norm_x(qx)
         kx = self.k_norm_x(kx)
 
-        qkv_y = self.qkv_y(y).reshape(B, Ny, 3, self.num_heads, C // self.num_heads).permute(2, 0, 1, 3, 4)
-        qy, ky, vy = qkv_y[0], qkv_y[1], qkv_y[2]
-        qy = self.q_norm_y(qy)
-        ky = self.k_norm_y(ky)
+        qy, ky, vy = self.text_qkv(y, pos_txt)
 
         attn_mk = torch.zeros((B, Nx), device=x.device, dtype=x.dtype)
         qx, kx = apply_rotary_emb(qx, kx, freqs_cis=pos_img)
-        if pos_txt is not None:
-            qy, ky = apply_rotary_emb(qy, ky, freqs_cis=pos_txt)
 
         qx = qx.transpose(1, 2)
         kx = kx.transpose(1, 2)
@@ -181,7 +212,7 @@ class MMDiTJointAttention(nn.Module):
             torch.save(self.learnable_token_vision, f"learnable_token_vision_{self.block_id}.pt")
 
 class MMDiTBlockT2I(nn.Module):
-    def __init__(self, hidden_size, groups, mlp_ratio=4.0, adaLN_modulation_img=None, adaLN_modulation_txt=None, block_id=-1):
+    def __init__(self, hidden_size, groups, mlp_ratio=4.0, adaLN_modulation_img=None, adaLN_modulation_txt=None, block_id=-1, language_dim=2304):
         super().__init__()
         self.hidden_size = hidden_size
         self.groups = groups
@@ -191,7 +222,7 @@ class MMDiTBlockT2I(nn.Module):
         self.norm_y1 = RMSNorm(hidden_size, eps=1e-6)
         # self.learnable_token_norm_weights = RMSNorm(hidden_size, eps=1e-6)
 
-        self.attn = MMDiTJointAttention(hidden_size, num_heads=groups, qkv_bias=False, block_id=block_id)
+        self.attn = MMDiTJointAttention(hidden_size, num_heads=groups, qkv_bias=False, block_id=block_id, language_dim=language_dim)
 
         self.norm_x2 = RMSNorm(hidden_size, eps=1e-6)
         self.norm_y2 = RMSNorm(hidden_size, eps=1e-6)
@@ -204,6 +235,12 @@ class MMDiTBlockT2I(nn.Module):
         self.adaLN_modulation_txt = adaLN_modulation_txt if adaLN_modulation_txt is not None else nn.Sequential(nn.Linear(hidden_size, 6 * hidden_size, bias=True))
 
         self.block_id = block_id
+
+    def text_qkv(self, y, c, pos_txt=None):
+        """Q, K, V of this block's text stream for text tokens y (B, Ny, C) and condition c."""
+        shift_msa_y, scale_msa_y, *_ = self.adaLN_modulation_txt(c).chunk(6, dim=-1)
+        y_norm = apply_adaln(self.norm_y1(y), shift_msa_y, scale_msa_y)
+        return self.attn.text_qkv(y_norm, pos_txt)
 
     def forward(self, x, y, c, pos_img, pos_txt=None, attn_mask=None, segment_data=None):
         shift_msa_x, scale_msa_x, gate_msa_x, shift_mlp_x, scale_mlp_x, gate_mlp_x = self.adaLN_modulation_img(c).chunk(6, dim=-1)
@@ -278,7 +315,8 @@ class PixDiT_T2I(nn.Module):
                 self.num_groups,
                 adaLN_modulation_img=self._shared_cond_adaln_img,
                 adaLN_modulation_txt=self._shared_cond_adaln_txt,
-                block_id=i
+                block_id=i,
+                language_dim=language_target_dim(self.hidden_size, self.txt_embed_dim),
             )
             for i in range(min(self.patch_depth, local_config.layer_count))
         ])
@@ -355,6 +393,37 @@ class PixDiT_T2I(nn.Module):
     #     diversity_loss = (cos_dist.pow(2) * off_diag).sum() / (K * (K - 1))
     #     return local_config.l2_regularization_weight * l2_penalty + local_config.diversity_regularization_weight * diversity_loss
 
+    def time_condition(self, t, B):
+        """adaLN condition for timestep t (already in model units, i.e. t_continuous * 1000)."""
+        t_emb = self.t_embedder(t.view(-1)).view(B, -1, self.hidden_size)
+        return torch.nn.functional.silu(t_emb)
+
+    def embed_text(self, y, B, dtype):
+        """Gemma hidden states (1, L, txt_embed_dim) -> text tokens entering block 0 (B, L, hidden)."""
+        if y.dim() != 3:
+            raise ValueError("Text embedding y must be [B, L, D]")
+        Ltxt = min(y.shape[1], self.txt_max_length)  # same as upstream: keep all 300 tokens
+        y = y[:, :Ltxt, :]
+        y_emb = self.y_embedder(y.to(local_config.device, dtype=dtype)).view(1, Ltxt, self.hidden_size).expand((B, -1, -1))
+        return y_emb + self.y_pos_embedding[:, :Ltxt, :].to(y_emb.dtype)
+
+    @torch.no_grad()
+    def first_layer_text_qkv(self, y, t, apply_rope=False):
+        """Q, K, V that the first attention block computes for text tokens y.
+
+        y: (1, L, txt_embed_dim) Gemma hidden states, token i at text position i.
+        t: timestep in model units, as forward() receives it.
+        Returns q, k, v, each (L, num_heads, head_dim). Q and K include the per-head RMSNorm,
+        plus the text RoPE when apply_rope is True (forward() always applies it when
+        use_text_rope is set).
+        """
+        dtype = next(self.parameters()).dtype
+        y_emb = self.embed_text(y, 1, dtype)
+        condition = self.time_condition(t.to(dtype), 1)
+        pos_txt = self.fetch_pos_text(y_emb.shape[1], y_emb.device) if (apply_rope and self.use_text_rope) else None
+        q, k, v = self.patch_blocks[0].text_qkv(y_emb, condition, pos_txt)
+        return q[0], k[0], v[0]
+
     def forward(self, x, t, y, s=None, mask=None, segment_data=None):
         B, _, H, W = x.shape
         Hs = H // self.patch_size
@@ -364,16 +433,10 @@ class PixDiT_T2I(nn.Module):
         pos = self.fetch_pos(Hs, Ws, x.device)
         x_patches = torch.nn.functional.unfold(x, kernel_size=self.patch_size, stride=self.patch_size).transpose(1, 2)
 
-        t_emb = self.t_embedder(t.view(-1)).view(B, -1, self.hidden_size)
+        y_emb = self.embed_text(y, B, x.dtype)
+        Ltxt = y_emb.shape[1]
 
-        if y.dim() != 3:
-            raise ValueError("Text embedding y must be [B, L, D]")
-        Ltxt = min(y.shape[1], self.txt_max_length)  # same as upstream: keep all 300 tokens
-        y = y[:, :Ltxt, :]
-        y_emb = self.y_embedder(y.to(local_config.device, dtype=x.dtype)).view(1, Ltxt, self.hidden_size).expand((B, -1, -1))
-        y_emb = y_emb + self.y_pos_embedding[:, :Ltxt, :].to(y_emb.dtype)
-
-        condition = torch.nn.functional.silu(t_emb)
+        condition = self.time_condition(t, B)
         if segment_data is not None:
             segment_data["hw"] = (Hs,Ws)
             segment_data["learned"] = {}
