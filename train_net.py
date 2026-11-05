@@ -66,6 +66,11 @@ def get_grad_accum_steps() -> int:
     return steps
 
 
+def overfit_single_batch_enabled() -> bool:
+    # Debug mode: train on the first batch over and over. Turn on with OVERFIT_SINGLE_BATCH=1.
+    return os.environ.get("OVERFIT_SINGLE_BATCH", "0") == "1"
+
+
 class GradAccumClipTrainer(SimpleTrainer):
     """
     SimpleTrainer / AMPTrainer replacement with gradient accumulation and clipping.
@@ -94,6 +99,19 @@ class GradAccumClipTrainer(SimpleTrainer):
             self.grad_scaler = torch.cuda.amp.GradScaler()
         self._micro_step = 0  # micro-batches accumulated in the current window
         self.max_iter = None  # set by Trainer after construction
+        self.overfit_single_batch = overfit_single_batch_enabled()
+        self._fixed_batch = None  # cached batch when overfit_single_batch is on
+
+    def _next_batch(self):
+        if not self.overfit_single_batch:
+            return next(self._data_loader_iter)
+        if self._fixed_batch is None:
+            self._fixed_batch = next(self._data_loader_iter)
+            names = [d.get("file_name", "?") for d in self._fixed_batch]
+            logging.getLogger("san").info(
+                "[overfit] Training on ONE fixed batch of %d images: %s", len(names), names
+            )
+        return self._fixed_batch
 
     def _is_last_micro_step(self) -> bool:
         return (
@@ -130,7 +148,7 @@ class GradAccumClipTrainer(SimpleTrainer):
     def run_step(self):
         assert self.model.training, "[GradAccumClipTrainer] model was changed to eval mode!"
         start = time.perf_counter()
-        data = next(self._data_loader_iter)
+        data = self._next_batch()
         data_time = time.perf_counter() - start
 
         is_step = self._is_last_micro_step()
