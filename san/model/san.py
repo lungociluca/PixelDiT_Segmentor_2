@@ -27,7 +27,6 @@ from t2i.diffusion.utils.logger import get_root_logger
 
 from t2i.diffusion.model.flow_dpm import DPMS
 from t2i.diffusion.model.trainer import PixDiTTrainer
-import t2i.pixdit_core.compute_masks as compute_masks_utils
 
 import t2i.config as local_config
 from detectron2.data import MetadataCatalog
@@ -186,7 +185,9 @@ class SAN(nn.Module):
                 src = next(k for k, v in self.class_labels.items() if v == labels)
                 self.class_labels[name], self.class_embs[name] = labels, self.class_embs[src]
                 continue
-            embs = self.precompute_prompts(labels).to(torch.float32)
+            embs = self.precompute_prompts(labels)
+            print("result", embs.shape)
+            exit(0)
             if name not in train_dataset_names:
                 embs = embs.cpu()
             self.class_labels[name], self.class_embs[name] = labels, embs
@@ -258,11 +259,36 @@ class SAN(nn.Module):
         }
     
     @torch.no_grad()
-    def precompute_prompts(self, labels: List[str]):
+    def precompute_prompts_legacy(self, labels: List[str]):
         prompts = [local_config.default_prompt + " " + local_config.subprompt.format(target=t) for t in labels]
         embs, _, _ = self.embed_condition(prompts)
         return embs  # (C, 1, 300, D)
     
+    @torch.no_grad()
+    def precompute_prompts(self, labels: List[str]):
+        prompts = [local_config.default_prompt + " " + local_config.subprompt.format(target=t) for t in labels]
+        embs, emb_masks, tokens_count = self.embed_condition(prompts)
+        for i in range(embs.shape[0]):
+            current_emb = embs[[i]]
+            current_mask = emb_masks[[i]]
+            tokens_count = tokens_count
+            # emb, emb_mask, tokens_count = self.embed_condition(prompts)
+            model_kwargs = dict(data_info={"img_hw": 1024, "aspect_ratio": 1}, mask=current_mask) # TODO: hardcoded resolution
+
+            dpm_solver = DPMS(
+                self.model.forward_with_dpmsolver_prompts,
+                condition=current_emb,
+                uncondition=None,
+                model_type="flow",
+                model_kwargs=model_kwargs,
+                schedule="FLOW",
+                cfg_scale=3.5,
+                precompute_embs=True
+            )
+
+            language_emb = dpm_solver.segment(torch.zeros(1), {})
+        return language_emb
+
     def embed_condition(self, prompts):
         caption_token = self.tokenizer(
             prompts, max_length=506, padding="max_length", truncation=True, return_tensors="pt"

@@ -163,6 +163,31 @@ class PixDiTTrainer(nn.Module):
             return out["x"]
         return out
 
+    def forward_prompts(self, timestep, y, mask=None, data_info=None, repa_tokens=None, segment_data=None, **kwargs):
+        timestep = timestep.to(self.dtype)
+        if y.dim() == 4:
+            y_proc = y.squeeze(1)
+        elif y.dim() == 3:
+            y_proc = y
+        else:
+            raise ValueError("PixDiTTrainer expects y of shape [B,1,L,C] or [B,L,C]")
+        y_proc = y_proc.to(self.dtype)
+
+        if y_proc.shape[-1] != self._txt_embed_dim:
+            raise RuntimeError(
+                f"PixDiTTrainer: text embedding dim {y_proc.shape[-1]} != expected {self._txt_embed_dim}. "
+                f"Please set config.text_encoder.caption_channels to {self._txt_embed_dim} or set extra.txt_embed_dim to {y_proc.shape[-1]}."
+            )
+
+        if hasattr(self.core, "last_repa_tokens"):
+            self.core.last_repa_tokens = None
+
+        return self.core.precompute_language_embs(timestep, y_proc)
+
+    def forward_with_dpmsolver_prompts(self, timestep, y, mask=None, segment_data=None, **kwargs):
+        out = self.forward_prompts(timestep, y, mask, segment_data=segment_data, **kwargs)
+        return out
+
     @property
     def dtype(self):
         return next(self.parameters()).dtype

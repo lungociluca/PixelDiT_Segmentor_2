@@ -85,6 +85,28 @@ class MMDiTJointAttention(nn.Module):
         with open(local_config.ds_config_path) as f:
             self.labels = json.load(f)
 
+    def precompute_language_embs(self, y, pos_txt):
+        By, Ny, Cy = y.shape
+
+        qkv_y = self.qkv_y(y).reshape(By, Ny, 3, self.num_heads, Cy // self.num_heads).permute(2, 0, 1, 3, 4)
+        qy, ky, vy = qkv_y[0], qkv_y[1], qkv_y[2]
+        qy = self.q_norm_y(qy)
+        ky = self.k_norm_y(ky)
+
+        if pos_txt is not None:
+            qy, ky = apply_rotary_emb(qy, ky, freqs_cis=pos_txt)
+
+        qy = qy.transpose(1, 2)
+        ky = ky.transpose(1, 2)
+        vy = vy.transpose(1, 2)
+
+        return ky
+        # out_y = F.scaled_dot_product_attention(qy, ky, kv, dropout_p=0.0)
+
+        # out_y = out_y.transpose(1, 2).reshape(B, Ny, C)
+        # out_y = self.proj_drop_y(self.proj_y(out_y))
+        # return out_y
+
     def forward(
             self,
             x: torch.Tensor,
@@ -202,6 +224,12 @@ class MMDiTBlockT2I(nn.Module):
         self.adaLN_modulation_txt = adaLN_modulation_txt if adaLN_modulation_txt is not None else nn.Sequential(nn.Linear(hidden_size, 6 * hidden_size, bias=True))
 
         self.block_id = block_id
+
+    def precompute_language_embs(self, y, c, pos_txt):
+        shift_msa_y, scale_msa_y, _, _, _, _ = self.adaLN_modulation_txt(c).chunk(6, dim=-1)
+        y_norm = apply_adaln(self.norm_y1(y), shift_msa_y, scale_msa_y)
+        attn_y = self.attn.precompute_language_embs(y_norm, pos_txt)
+        return attn_y
 
     def forward(self, x, y, c, pos_img, pos_txt=None, attn_mask=None, segment_data=None):
         shift_msa_x, scale_msa_x, gate_msa_x, shift_mlp_x, scale_mlp_x, gate_mlp_x = self.adaLN_modulation_img(c).chunk(6, dim=-1)
@@ -352,6 +380,22 @@ class PixDiT_T2I(nn.Module):
     #     off_diag = 1.0 - eye
     #     diversity_loss = (cos_dist.pow(2) * off_diag).sum() / (K * (K - 1))
     #     return local_config.l2_regularization_weight * l2_penalty + local_config.diversity_regularization_weight * diversity_loss
+
+    def precompute_language_embs(self, t, y):
+        B = y.shape[0]
+        t_emb = self.t_embedder(t.view(-1)).view(B, -1, self.hidden_size)
+
+        if y.dim() != 3:
+            raise ValueError("Text embedding y must be [B, L, D]")
+        Ltxt = min(y.shape[1], max(1, self.txt_max_length - 1))
+        y = y[:, :Ltxt, :]
+        y_emb = self.y_embedder(y.to(local_config.device)).view(1, Ltxt, self.hidden_size).expand((B, -1, -1))
+        y_emb = y_emb + self.y_pos_embedding[:, :Ltxt, :].to(y_emb.dtype)
+
+        condition = torch.nn.functional.silu(t_emb)
+
+        pos_txt = self.fetch_pos_text(Ltxt, local_config.device) if self.use_text_rope else None
+        return self.patch_blocks[0].precompute_language_embs(y_emb, condition, pos_txt)
 
     def forward(self, x, t, y, s=None, mask=None, segment_data=None):
         B, _, H, W = x.shape

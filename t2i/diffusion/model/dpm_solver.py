@@ -447,6 +447,85 @@ def model_wrapper(
     return model_fn
 
 
+def precompute_language_embs_fn(
+    model,
+    noise_schedule,
+    model_type="noise",
+    model_kwargs={},
+    guidance_type="uncond",
+    condition=None,
+    unconditional_condition=None,
+    guidance_scale=1.0,
+    interval_guidance=[0, 1.0],
+    classifier_fn=None,
+    classifier_kwargs={},
+    segment_data=None
+):
+    def get_model_input_time(t_continuous):
+        """
+        Convert the continuous-time `t_continuous` (in [epsilon, T]) to the model input time.
+        For discrete-time DPMs, we convert `t_continuous` in [1 / N, 1] to `t_input` in [0, 1000 * (N - 1) / N].
+        For continuous-time DPMs, we just use `t_continuous`.
+        """
+        if noise_schedule.schedule == "discrete":
+            return (t_continuous - 1.0 / noise_schedule.total_N) * noise_schedule.total_N
+        elif noise_schedule.schedule == "discrete_flow":
+            return t_continuous * noise_schedule.total_N
+        else:
+            return t_continuous
+
+    def noise_pred_fn(t_continuous, cond=None, segment_data=segment_data):
+        t_input = get_model_input_time(t_continuous)
+        return model(t_input, cond)
+
+    def cond_grad_fn(x, t_input):
+        """
+        Compute the gradient of the classifier, i.e. nabla_{x} log p_t(cond | x_t).
+        """
+        with torch.enable_grad():
+            x_in = x.detach().requires_grad_(True)
+            log_prob = classifier_fn(x_in, t_input, condition, **classifier_kwargs)
+            return torch.autograd.grad(log_prob.sum(), x_in)[0]
+
+    def model_fn(_, t_continuous, segment_data=None):
+        """
+        The noise predicition model function that is used for DPM-Solver.
+        """
+        guidance_tp = guidance_type
+        if guidance_tp == "uncond":
+            return noise_pred_fn(x, t_continuous)
+        elif guidance_tp == "classifier":
+            assert classifier_fn is not None
+            t_input = get_model_input_time(t_continuous)
+            cond_grad = cond_grad_fn(x, t_input)
+            sigma_t = noise_schedule.marginal_std(t_continuous)
+            noise = noise_pred_fn(x, t_continuous)
+            return noise - guidance_scale * expand_dims(sigma_t, x.dim()) * cond_grad
+        elif guidance_tp == "classifier-free":
+            if (
+                guidance_scale == 1.0
+                or unconditional_condition is None
+                or not (interval_guidance[0] < t_continuous[0] < interval_guidance[1])
+            ):
+                return noise_pred_fn(t_continuous, cond=condition, segment_data=segment_data)
+            else:
+                t_in = torch.cat([t_continuous] * 2)
+                c_in = torch.cat([unconditional_condition, condition])
+                try:
+                    noise_uncond, noise = noise_pred_fn(t_in, cond=c_in, segment_data=segment_data).chunk(2)
+                except:
+                    noise_uncond, noise = noise_pred_fn(t_in, cond=c_in, segment_data=segment_data)[0].chunk(2)
+                return noise_uncond + guidance_scale * (noise - noise_uncond)
+
+    assert model_type in ["noise", "x_start", "v", "score", "flow"]
+    assert guidance_type in [
+        "uncond",
+        "classifier",
+        "classifier-free",
+    ]
+    return model_fn
+
+
 class DPM_Solver:
     def __init__(
         self,
