@@ -200,7 +200,7 @@ class SAN(nn.Module):
         del self.tokenizer
         del self.text_encoder
 
-        # Store the frozen PixelDiT weights in the autocast dtype. Under fp32 weights,
+        # Store the frozen PixelDiT weights in the autocast dtype. Under fp32 weights, 
         # autocast keeps a half-precision copy of every weight during the forward pass,
         # so this roughly removes 1.5x the backbone size from GPU memory. Trainable
         # learnable_token* params stay fp32 for the optimizer. Done after the class
