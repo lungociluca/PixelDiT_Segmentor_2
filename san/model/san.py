@@ -85,7 +85,12 @@ def set_env(seed=0, latent_size=256):
     for _ in range(30):
         torch.randn(1, 4, latent_size, latent_size)
 
-def get_model():
+def get_model(dtype=torch.float32):
+    """Frozen PixelDiT backbone + Gemma text encoder. No parameter requires grad.
+
+    `dtype` is the dtype of the backbone weights (torch.bfloat16 halves their memory).
+    Only `t2i.config.layer_count` blocks are built (and loaded).
+    """
     args = Namespace(config='diffusion_configs/PixelDiT_1024px_pixel_diffusion_stage3.yaml')
     config = args = pyrallis.parse(config_class=PixelDiTInference, config_path=args.config, args=[])
     from t2i.tools.download import resolve_checkpoint
@@ -118,36 +123,30 @@ def get_model():
     logger.info(f"Inference with {weight_dtype}, guidance_type: {guidance_type}, flow_shift: {flow_shift}")
 
     tokenizer, text_encoder = get_tokenizer_and_text_encoder(name=config.text_encoder.text_encoder_name, device=device)
-    for param in text_encoder.parameters():
-        param.requires_grad = False
+    text_encoder.requires_grad_(False)
 
-    null_caption_token = tokenizer(
-        args.negative_prompt if hasattr(args, "negative_prompt") and len(args.negative_prompt) > 0 else "",
-        max_length=max_sequence_length,
-        padding="max_length",
-        truncation=True,
-        return_tensors="pt",
-    ).to(device)
-    null_caption_embs = text_encoder(null_caption_token.input_ids, null_caption_token.attention_mask, use_cache=False)[0]
 
     # model setting
     model_kwargs = model_init_config(config, latent_size=latent_size)
     model = build_model(
         config.model.model, use_fp32_attention=config.model.get("fp32_attention", False), **model_kwargs
     )
-    for name, param in model.named_parameters():
-        param.requires_grad = ("learnable_token" in name) and local_config.save_learned_tokens
-        
-    model = model.to(device)
-    logger.info(
-        f"{model.__class__.__name__}:{config.model.model}, Model Parameters: {sum(p.numel() for p in model.parameters()):,}"
-    )
-    state_dict = torch.load("t2i/pixeldit_t2i_v1.pth", map_location=lambda storage, loc: storage)
+    state_dict = torch.load("t2i/pixeldit_t2i_v1.pth", map_location="cpu")
     if "pos_embed" in state_dict["state_dict"]:
         del state_dict["state_dict"]["pos_embed"]
-
+    # strict=False: blocks beyond layer_count are not built, so their weights are skipped
     missing, unexpected = model.load_state_dict(state_dict["state_dict"], strict=False)
-    return model.eval().to(torch.float32), tokenizer, text_encoder.eval()
+    del state_dict
+    if missing:
+        logger.warning(f"PixelDiT weights missing from the checkpoint: {missing}")
+
+    model.requires_grad_(False)
+    model = model.to(device=device, dtype=dtype).eval()
+    logger.info(
+        f"{model.__class__.__name__}:{config.model.model}, blocks: {len(model.core.patch_blocks)}, "
+        f"parameters: {sum(p.numel() for p in model.parameters()):,} (all frozen)"
+    )
+    return model, tokenizer, text_encoder.eval()
 
 
 @META_ARCH_REGISTRY.register()
@@ -190,25 +189,12 @@ class SAN(nn.Module):
             if name not in train_dataset_names:
                 embs = embs.cpu()
             self.class_labels[name], self.class_embs[name] = labels, embs
-        # Cache of token-weighted class vectors, valid only while weights are frozen (eval).
-        self._language_target_cache = {}
-
         del self.tokenizer
         del self.text_encoder
 
-        self.learnable_token_norm_weights = torch.nn.LayerNorm(local_config.no_vision_learnable_tokens)
-        if local_config.use_learned_tokens:
-            self.learnable_token_norm_weights.load_state_dict(torch.load("norm_weights.pt", weights_only=True))
-            self.learnable_token_norm_weights = self.learnable_token_norm_weights
-        self.learnable_token_norm_weights.to(local_config.device)
-
-        if local_config.use_learned_tokens:
-            self.learnable_token_language_weights = torch.load("learnable_token_language_weights.pt", weights_only=False)
-            self.learnable_token_language_no_object = torch.load("learnable_token_language_no_object.pt", weights_only=False)
-        else:
-            self.learnable_token_language_weights = torch.nn.Embedding(300, 1).to(local_config.device)
-            self.learnable_token_language_no_object = torch.nn.Embedding(1, 2304).to(local_config.device)
-        
+        # The trainable head (learnable tokens, norm weights, language weights, no-object
+        # embedding) was removed: everything here is frozen.
+        self.requires_grad_(False)
 
     @classmethod
     def from_config(cls, cfg):
@@ -299,145 +285,19 @@ class SAN(nn.Module):
             segment_data
         )
 
-    @staticmethod
-    def language_targets(language_tokens, language_weights, chunk_size=64):
-        device = language_weights.device
-        out = []
-        for i in range(0, language_tokens.shape[0], chunk_size):
-            chunk = language_tokens[i:i + chunk_size].to(device, non_blocking=True)
-            out.append((language_weights * chunk).sum(dim=-2))
-        return torch.cat(out, dim=0)
-
-    def get_language_targets(self, dataset_name):
-        weights = self.learnable_token_language_weights.weight
-        if self.training:
-            self._language_target_cache.clear()
-            return SAN.language_targets(self.class_embs[dataset_name], weights)
-        if dataset_name not in self._language_target_cache:
-            with torch.no_grad():
-                self._language_target_cache[dataset_name] = SAN.language_targets(
-                    self.class_embs[dataset_name], weights
-                )
-        return self._language_target_cache[dataset_name]
-
-    def train(self, mode: bool = True):
-        self._language_target_cache = {}
-        return super().train(mode)
-
-    @staticmethod
-    def clasify_masks(visual_tokens, language_targets, language_no_object):
-        # visual_tokens -> (B, layers, Q, D), language_targets -> (C, 1, D)
-        B = visual_tokens.shape[0]
-        visual_tokens = visual_tokens.sum(dim=1) # sum across layers TODO: try other ways of aggregating visual features for comparison with language
-        language_targets = torch.cat([language_targets, language_no_object[None,:,:]], dim=0).permute(1,2,0).expand(B, -1, -1)
-        visual_tokens = visual_tokens.permute(0,2,1)
-        my_norm = lambda x,d: torch.nn.functional.normalize(x, dim=d)
-        classes = my_norm(visual_tokens, 1).permute(0,2,1) @ my_norm(language_targets, 1)
-        return classes
-    
     def call_model(self, image_tensor, dataset_name):
+        """Runs the frozen backbone. Returns the per-pass data (patch grid size in segment_data["hw"])."""
         segment_data = {}
-        with torch.enable_grad():
+        with torch.no_grad():
             self.run_diffusion_model(image_tensor, segment_data)
-        
-        visual_features = segment_data["all_vision_features"]
-        vl_features = segment_data["vl_learned"]
-
-        learned_vision = visual_features[:,:,:local_config.no_vision_learnable_tokens,:]
-        dense_vision = visual_features[:,:,local_config.no_vision_learnable_tokens:,:]
-        h, w = segment_data["hw"]
-
-        my_norm = lambda x: x if not local_config.norm_before_dot else torch.nn.functional.normalize(x, dim=-1)
-        mask_pred = my_norm(dense_vision) @ my_norm(learned_vision).permute(0, 1, 3, 2)
-
-        # masks (b, l, p, t) * (b, l, 1, t)
-        # weighted sum to aggregate masks of all layers
-        mask_pred = self.learnable_token_norm_weights(mask_pred)
-        mask_pred = mask_pred.sum(dim=1)
-
-        mask_logits = SAN.clasify_masks(
-            vl_features,
-            self.get_language_targets(dataset_name),
-            self.learnable_token_language_no_object.weight,
-        )
-        B, P, L = mask_pred.shape
-        return mask_logits, mask_pred.permute(0, 2, 1).view(B, L, h, w)
+        return segment_data
 
     def forward(self, batched_inputs):
-        images = [x["image"].to(local_config.device).float() / 255.0 for x in batched_inputs]
-        images = [x * 2 - 1 for x in images]
-        images = ImageList.from_tensors(
-            images,
-            self.size_divisibility,
-            pad_value=-1.0,
-            padding_constraints={"square_size": 1024},   # recent detectron2 versions
+        raise NotImplementedError(
+            "SAN has no mask/classification head any more: the learnable tokens and their MLPs were "
+            "removed, so it cannot produce or train mask predictions. Use vl_alignment_stats.py to "
+            "analyse the frozen backbone, and add a new head here once the target layer is chosen."
         )
-        images_tensor = images.tensor
-        # print("image tensor stats", images_tensor.shape, images_tensor.min(), images_tensor.max(), images_tensor.mean())
-        # print("ids",  [x["file_name"]for x in batched_inputs])
-        mask_logits, mask_preds = self.call_model(images_tensor, self._dataset_name(batched_inputs))
-        if self.training:
-            if "instances" in batched_inputs[0]:
-                gt_instances = [x["instances"].to(local_config.device) for x in batched_inputs]
-                targets = self.prepare_targets(gt_instances, images)
-            else:
-                targets = None
-            outputs = {
-                "pred_logits": mask_logits,
-                "pred_masks": mask_preds,
-                # "aux_outputs": [
-                #     {
-                #         "pred_logits": aux_pred_logits,
-                #         "pred_masks": aux_pred_masks,
-                #     }
-                #     for aux_pred_logits, aux_pred_masks in zip(
-                #         mask_logits[:-1], mask_preds[:-1]
-                #     )
-                # ],
-            }
-
-            losses = self.criterion(outputs, targets)
-
-            for k in list(losses.keys()):
-                if k in self.criterion.weight_dict:
-                    losses[k] *= self.criterion.weight_dict[k]
-                else:
-                    # remove this loss if not specified in `weight_dict`
-                    losses.pop(k)
-            return losses
-        else:
-            # mask_preds = mask_preds[-1]
-            # mask_logits = mask_logits[-1]
-            # torch.cuda.empty_cache()
-            # Inference
-            mask_preds = F.interpolate(
-                mask_preds,
-                size=(images.tensor.shape[-2], images.tensor.shape[-1]),
-                mode="bilinear",
-                align_corners=False,
-            )
-            processed_results = []
-            for mask_cls_result, mask_pred_result, input_per_image, image_size in zip(
-                mask_logits, mask_preds, batched_inputs, images.image_sizes
-            ):
-                height = input_per_image.get("height", image_size[0])
-                width = input_per_image.get("width", image_size[1])
-                processed_results.append({})
-
-                if self.sem_seg_postprocess_before_inference:
-                    mask_pred_result = retry_if_cuda_oom(sem_seg_postprocess)(
-                        mask_pred_result, image_size, height, width
-                    )
-                    mask_cls_result = mask_cls_result.to(mask_pred_result)
-                r = retry_if_cuda_oom(self.semantic_inference)(
-                    mask_cls_result, mask_pred_result
-                )
-                if not self.sem_seg_postprocess_before_inference:
-                    r = retry_if_cuda_oom(sem_seg_postprocess)(
-                        r, image_size, height, width
-                    )
-                processed_results[-1]["sem_seg"] = r
-            return processed_results
 
     def _dataset_name(self, batched_inputs):
         names = {x.get("meta", {}).get("dataset_name", self.default_dataset) for x in batched_inputs}

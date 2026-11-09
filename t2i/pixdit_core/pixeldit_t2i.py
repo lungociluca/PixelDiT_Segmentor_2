@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
-import json, einops
+import einops
 from typing import Tuple
 
 from .pixeldit_c2i import PatchTokenEmbedder, PixelTokenEmbedder, PiTBlock
@@ -51,39 +51,6 @@ class MMDiTJointAttention(nn.Module):
         self.proj_drop_y = nn.Dropout(proj_drop)
         self.block_id = block_id
 
-        if local_config.use_vision_mlp:
-            self.learnable_token_vision_mlp = torch.nn.Sequential(
-                torch.nn.Linear(dim, dim),
-                torch.nn.Tanh(),
-                torch.nn.Linear(dim, dim),
-                torch.nn.Tanh(),
-                torch.nn.Linear(dim,dim)
-            )
-
-        self.learnable_token_vl_mlp = torch.nn.Sequential(
-                torch.nn.Linear(dim, dim),
-                torch.nn.Tanh(),
-                torch.nn.Linear(dim, dim * 2),
-                torch.nn.Tanh(),
-                torch.nn.Linear(dim * 2, 2304),
-                torch.nn.Tanh()
-            )
-
-        if local_config.use_learned_tokens:
-            self.learnable_token_vision = torch.load(f"learnable_token_vision_{self.block_id}.pt", weights_only=False)
-        else:
-            self.learnable_token_vision = nn.Embedding(local_config.no_vision_learnable_tokens, dim)
-        
-        if local_config.use_learned_tokens:
-            if local_config.use_vision_mlp:
-                vision_state = torch.load(f"learnable_token_vision_mlp_{self.block_id}.pt", map_location=local_config.device)
-                self.learnable_token_vision_mlp.load_state_dict(vision_state)
-            
-            weight_vision_state = torch.load(f"learnable_token_vl_mlp_{self.block_id}.pt", map_location=local_config.device)
-            self.learnable_token_vl_mlp.load_state_dict(weight_vision_state)
-        
-        with open(local_config.ds_config_path) as f:
-            self.labels = json.load(f)
 
     def forward(
             self,
@@ -94,36 +61,6 @@ class MMDiTJointAttention(nn.Module):
             attn_mask: torch.Tensor = None,
             segment_data=None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        B, _, C = y.shape
-
-        ####################################################################################################
-        all_vision_tokens_count = x.shape[1] + local_config.no_vision_learnable_tokens
-        qkv_x_l = self.qkv_x(
-            torch.cat([self.learnable_token_vision.weight.expand(B, -1, -1), x], dim=1)
-        ).reshape(B, all_vision_tokens_count, 3, self.num_heads, C // self.num_heads).permute(2, 0, 1, 3, 4)
-        qxl, kxl, vxl = qkv_x_l[0], qkv_x_l[1], qkv_x_l[2]
-        qxl = self.q_norm_x(qxl)
-        kxl = self.k_norm_x(kxl)
-
-        qxl = qxl.transpose(1, 2)
-        kxl = kxl.transpose(1, 2)
-        vxl = vxl.transpose(1, 2)
-
-        if local_config.use_vision_attention_bias:
-            attention_bias = torch.ones((all_vision_tokens_count, all_vision_tokens_count), dtype=torch.bool, device=local_config.device)
-            attention_bias[:, :local_config.weight_tokens] = False
-        else:
-            attention_bias = None
-        out_joint_l = F.scaled_dot_product_attention(qxl, kxl, vxl, dropout_p=0.0, attn_mask=attention_bias)
-        out_joint_l = out_joint_l.transpose(1, 2).reshape(B, all_vision_tokens_count, C)
-        out_joint_l = self.proj_x(out_joint_l)
-
-        segment_data["vl_learned"][self.block_id] = self.learnable_token_vl_mlp(out_joint_l[:,:local_config.no_vision_learnable_tokens,:])
-        segment_data["vision_learned"][self.block_id] = self.learnable_token_vision_mlp(out_joint_l)
-        
-        ####################################################################################################
-        
-
         B, Nx, C = x.shape
         By, Ny, Cy = y.shape
         assert B == By and C == Cy, "x and y must share batch and channel dims"
@@ -172,10 +109,6 @@ class MMDiTJointAttention(nn.Module):
         out_y = out_y.transpose(1, 2).reshape(B, Ny, C)
         out_x = out_x.transpose(1, 2).reshape(B, Nx, C)
 
-        out_x_learned = self.proj_x(out_x.clone())
-        if local_config.use_vision_mlp:
-            out_x_learned = self.learnable_token_vision_mlp(out_x_learned)
-
         out_x = self.proj_drop_x(self.proj_x(out_x))
         out_y = self.proj_drop_y(self.proj_y(out_y))
 
@@ -184,12 +117,6 @@ class MMDiTJointAttention(nn.Module):
 
         return out_x, out_y, attn_mk
 
-    def __del__(self):
-        if local_config.save_learned_tokens:
-            if local_config.use_vision_mlp:
-                torch.save(self.learnable_token_vision_mlp.state_dict(), f"learnable_token_vision_mlp_{self.block_id}.pt")
-            torch.save(self.learnable_token_vl_mlp.state_dict(), f"learnable_token_vl_mlp_{self.block_id}.pt")
-            torch.save(self.learnable_token_vision, f"learnable_token_vision_{self.block_id}.pt")
 
 class MMDiTBlockT2I(nn.Module):
     def __init__(self, hidden_size, groups, mlp_ratio=4.0, adaLN_modulation_img=None, adaLN_modulation_txt=None, block_id=-1):
@@ -200,7 +127,6 @@ class MMDiTBlockT2I(nn.Module):
 
         self.norm_x1 = RMSNorm(hidden_size, eps=1e-6)
         self.norm_y1 = RMSNorm(hidden_size, eps=1e-6)
-        # self.learnable_token_norm_weights = RMSNorm(hidden_size, eps=1e-6)
 
         self.attn = MMDiTJointAttention(hidden_size, num_heads=groups, qkv_bias=False, block_id=block_id)
 
@@ -222,8 +148,7 @@ class MMDiTBlockT2I(nn.Module):
 
         x_norm = apply_adaln(self.norm_x1(x), shift_msa_x, scale_msa_x)
         y_norm = apply_adaln(self.norm_y1(y), shift_msa_y, scale_msa_y)
-        with torch.enable_grad():
-            attn_x, attn_y, attn_mk = self.attn(x_norm, y_norm, pos_img, pos_txt, attn_mask, segment_data=segment_data)
+        attn_x, attn_y, attn_mk = self.attn(x_norm, y_norm, pos_img, pos_txt, attn_mask, segment_data=segment_data)
 
         x = x + gate_msa_x * attn_x
         y = y + gate_msa_y * attn_y
@@ -282,7 +207,6 @@ class PixDiT_T2I(nn.Module):
         self.t_embedder = TimestepConditioner(hidden_size)
         self.y_embedder = PatchTokenEmbedder(self.txt_embed_dim, hidden_size, bias=True, norm_layer=RMSNorm)
         self.y_pos_embedding = nn.Parameter(torch.randn(1, self.txt_max_length, hidden_size))
-        # self.register_buffer("learnable_token_target", torch.ones(1, 1, hidden_size), persistent=False)
 
         self._shared_cond_adaln = None
         self._shared_cond_adaln_img = None
@@ -397,9 +321,6 @@ class PixDiT_T2I(nn.Module):
         condition = torch.nn.functional.silu(t_emb)
         if segment_data is not None:
             segment_data["hw"] = (Hs,Ws)
-            segment_data["learned"] = {}
-            segment_data["vision_learned"] = {}
-            segment_data["vl_learned"] = {}
         
         if s is None:
             s0 = self.s_embedder(x_patches)
@@ -418,23 +339,8 @@ class PixDiT_T2I(nn.Module):
             self.last_repa_tokens = None
             s = s0
 
-            with torch.enable_grad():
-                for i in range(min(self.patch_depth, local_config.layer_count)):
-                    s, y_emb, attn_mk = self.patch_blocks[i](s, y_emb, condition, pos, pos_txt, attn_mask_joint, segment_data=segment_data)
-                    if 0 < self.repa_encoder_index == (i + 1):
-                        self.last_repa_tokens = s
-                    
-                    # import os
-                    # attn_mk_disp = attn_mk.to(torch.float32)[-1,:].view(Hs, Ws).detach().cpu()
-                    # plt.imshow(attn_mk_disp, cmap="viridis")
-                    # plt.savefig(f"trash/{i}_{len(os.listdir('trash'))}.png")
-                    # plt.close()
-
-                    # if segment_data is not None:
-                    #     segment_data["mask"][i] = attn_mk.view(B, Hs, Ws)
-
-                stack_features = lambda k: torch.stack([segment_data[k][i] for i in range(min(self.patch_depth, local_config.layer_count))], dim=1)
-                my_norm = lambda x: torch.nn.functional.normalize(x, dim=-1)
-                segment_data["all_vision_features"] = stack_features("vision_learned")
-                segment_data["vl_learned"] = stack_features("vl_learned")
+            for i in range(len(self.patch_blocks)):
+                s, y_emb, attn_mk = self.patch_blocks[i](s, y_emb, condition, pos, pos_txt, attn_mask_joint, segment_data=segment_data)
+                if 0 < self.repa_encoder_index == (i + 1):
+                    self.last_repa_tokens = s
         return x

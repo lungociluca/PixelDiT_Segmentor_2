@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import argparse
 import glob
-import json
 import os
 import sys
 import time
@@ -68,8 +67,15 @@ def parse_args(argv=None):
                    help="resize so the long side is this many pixels (rounded to the 16-px patch grid)")
     m.add_argument("--timestep", type=float, default=None, help="flow time in [0,1] (default t2i/config.timestep)")
     m.add_argument("--add-noise", action="store_true", help="noise the image to the flow time x_t=(1-t)x+t*eps")
-    m.add_argument("--layers", default="all", help="'all', '0-13' or '0,4,7'")
+    m.add_argument("--num-layers", type=int, default=None,
+                   help="build and analyse only the first N MMDiT blocks (e.g. 5 -> layers 0-4). "
+                        "Blocks after the last analysed one are never built, which saves memory and time.")
+    m.add_argument("--layers", default="all",
+                   help="which of the built blocks to analyse: 'all', '0-4' or '0,2,4' "
+                        "(without --num-layers, blocks up to the highest one listed are built)")
     m.add_argument("--no-amp", action="store_true", help="run in fp32 instead of bf16 autocast")
+    m.add_argument("--fp32-weights", action="store_true",
+                   help="keep the backbone weights in fp32 (default bf16, half the memory)")
     m.add_argument("--seed", type=int, default=0)
 
     t = p.add_argument_group("text")
@@ -85,7 +91,8 @@ def parse_args(argv=None):
                    help="do not prepend t2i/config.default_prompt to class prompts (SAN prepends it)")
     t.add_argument("--list-template", default="There may be any of the following in the picture: {targets}.")
     t.add_argument("--max-length", type=int, default=506, help="tokenizer padding length (SAN uses 506)")
-    t.add_argument("--text-batch", type=int, default=7, help="class prompts per forward pass")
+    t.add_argument("--text-batch", type=int, default=4,
+                   help="class prompts per forward pass; lower it (down to 1) if CUDA runs out of memory")
 
     s = p.add_argument_group("statistics")
     s.add_argument("--spaces", default=",".join(SPACES), help=f"comma list from {SPACES}")
@@ -313,6 +320,7 @@ def main(argv=None):
     import torch
     import t2i.config as local_config
 
+    torch.set_grad_enabled(False)
     if not torch.cuda.is_available():
         sys.exit("CUDA is required (t2i/config.device is 'cuda').")
     torch.manual_seed(args.seed)
@@ -322,31 +330,31 @@ def main(argv=None):
     spaces = [s.strip() for s in args.spaces.split(",") if s.strip()]
     per_head = [s.strip() for s in args.per_head.split(",") if s.strip()]
 
-    # Measure the pretrained backbone: never load or overwrite the learnable-token files,
-    # build every requested block (training only builds `layer_count` of them).
+    # Only build the blocks that are analysed: layers beyond the last requested one are never needed.
     requested = None if args.layers == "all" else parse_layers(args.layers, 10 ** 6)
-    local_config.save_learned_tokens = False
-    local_config.use_learned_tokens = False
-    local_config.layer_count = (max(requested) + 1) if requested else 10 ** 6
-    if not os.path.isfile(local_config.ds_config_path):   # only read for its label list, unused here
-        path = os.path.join(args.out_dir, "voc_labels.json")
-        with open(path, "w") as f:
-            json.dump(class_names, f)
-        local_config.ds_config_path = path
+    if args.num_layers is not None:
+        if args.num_layers < 1:
+            sys.exit("--num-layers must be >= 1")
+        local_config.layer_count = args.num_layers
+        if requested is not None and max(requested) >= args.num_layers:
+            sys.exit(f"--layers {args.layers} asks for blocks beyond --num-layers {args.num_layers}")
+    else:
+        local_config.layer_count = (max(requested) + 1) if requested else 10 ** 6
 
     from san.model.san import get_model
     from t2i.vl_stats.probe import VLAlignmentProbe, build_patch_gt
 
     device = local_config.device
-    model, tokenizer, text_encoder = get_model()
-    model.eval()
+    model, tokenizer, text_encoder = get_model(dtype=torch.float32 if args.fp32_weights else torch.bfloat16)
+    assert not any(p.requires_grad for p in model.parameters()), "backbone must be frozen"
     core = model.core
     depth = len(core.patch_blocks)
     layers = [l for l in (requested or range(depth)) if l < depth]
     patch = core.patch_size
     keep = core.txt_max_length                      # 300 tokens fed to the model ...
     usable = min(keep, max(1, core.txt_max_length - 1))  # ... of which the first 299 are used
-    print(f"[vl_stats] PixelDiT blocks: {depth}, probing layers {layers}, spaces {spaces}, per-head {per_head}")
+    torch.cuda.empty_cache()
+    print(f"[vl_stats] PixelDiT blocks built: {depth}, probing layers {layers}, spaces {spaces}, per-head {per_head}")
 
     prompts = build_prompts(class_names, args, local_config)
     if args.text_mode == "per_class":
@@ -397,7 +405,7 @@ def main(argv=None):
             xb = x.expand(len(rows), -1, -1, -1)
             probe.set_roles(text_roles, image_roles)
             segment_data = {"vl_probe": probe}
-            with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=not args.no_amp):
+            with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=not args.no_amp):
                 model.forward_with_dpmsolver(
                     xb, t_input, y, mask=None,
                     data_info={"img_hw": x.shape[-2], "aspect_ratio": 1}, segment_data=segment_data,

@@ -46,19 +46,28 @@ Outputs in `--out-dir`: `summary.md` (best layer per space, top-10 rankings), `m
 
 ## Usage
 
-Run from the repository root (checkpoint paths are relative). Learnable tokens are neither loaded
-nor saved: the script measures the pretrained backbone and builds all 14 blocks regardless of
-`t2i/config.layer_count`.
+Run from the repository root (checkpoint paths are relative). The backbone is fully frozen
+(no learnable tokens, no parameter requires grad) and runs under `torch.inference_mode`.
+
+By default all 14 blocks are built and analysed. `--num-layers N` builds and analyses only the
+first N blocks (blocks after them are never built or loaded); `--layers` picks a subset of the
+built blocks, e.g. `--num-layers 5 --layers 0,2,4`.
 
 ```bash
 export DETECTRON2_DATASETS=../datasets
 # quick look
 python vl_alignment_stats.py --max-images 200 --out-dir output/vl_stats
+# only the first 5 blocks
+python vl_alignment_stats.py --num-layers 5 --out-dir output/vl_stats_5
 # full val set on 4 GPUs, with per-head analysis of the attention logits
 for i in 0 1 2 3; do CUDA_VISIBLE_DEVICES=$i python vl_alignment_stats.py --per-head qk \
     --num-shards 4 --shard-id $i --out-dir output/vl_stats & done; wait
 python vl_alignment_stats.py --merge "output/vl_stats/raw_shard*of4.npz" --out-dir output/vl_stats
 ```
+
+If CUDA runs out of memory, in order of impact: lower `--text-batch` (default 4; 1 is the
+minimum), use `--num-layers`, lower `--image-size` (e.g. 768 or 512), or use `--text-mode list`.
+Backbone weights are kept in bf16 (`--fp32-weights` to change that).
 
 Useful options: `--gt-format detectron2` (uses `annotations_detectron2/val`; background is then
 ignored), `--text-mode list` (one prompt naming all classes: 2 passes per image instead of 4),
