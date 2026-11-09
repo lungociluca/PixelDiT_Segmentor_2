@@ -2,7 +2,8 @@ DATASETS:
   TRAIN: ("coco_2017_train_stuff_sem_seg",)
   TEST: ('voc_sem_seg_val',) # ('coco_2017_test_stuff_sem_seg', 'voc_sem_seg_val','pcontext_sem_seg_val','ade20k_sem_seg_val','pcontext_full_sem_seg_val','ade20k_full_sem_seg_val')
 SOLVER:
-  IMS_PER_BATCH: 4
+  IMS_PER_BATCH: 2      # micro-batch per GPU step (what has to fit in memory)
+  GRAD_ACCUM_STEPS: 8   # optimizer step every 4 micro-batches -> effective batch 4
   BASE_LR: 0.0001
   MAX_ITER: 5000
   WARMUP_FACTOR: 1.0
@@ -12,12 +13,17 @@ SOLVER:
   LR_SCHEDULER_NAME: "WarmupPolyLR"
   BACKBONE_MULTIPLIER: 1.0
   CLIP_GRADIENTS:
-    ENABLED: True
+    # Was never applied before (dead code in build_optimizer). Kept off so runs match
+    # earlier ones; check the logged grad_norm before picking a CLIP_VALUE.
+    ENABLED: False
     CLIP_TYPE: "full_model"
     CLIP_VALUE: 0.01
     NORM_TYPE: 2.0
   AMP:
     ENABLED: True
+    # PixelDiT was trained in bf16; falls back to float16 on GPUs without bf16 (pre-Ampere).
+    # Also the dtype the frozen backbone weights are stored in.
+    PRECISION: "bfloat16"
 INPUT:
   MIN_SIZE_TRAIN: !!python/object/apply:eval ["[int(x * 0.1 * 1024) for x in range(10, 16)]"]
   MIN_SIZE_TRAIN_SAMPLING: "choice"

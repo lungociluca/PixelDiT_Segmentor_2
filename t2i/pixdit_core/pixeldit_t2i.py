@@ -249,8 +249,7 @@ class MMDiTBlockT2I(nn.Module):
 
         x_norm = apply_adaln(self.norm_x1(x), shift_msa_x, scale_msa_x)
         y_norm = apply_adaln(self.norm_y1(y), shift_msa_y, scale_msa_y)
-        with torch.enable_grad():
-            attn_x, attn_y, attn_mk = self.attn(x_norm, y_norm, pos_img, pos_txt, attn_mask, segment_data=segment_data)
+        attn_x, attn_y, attn_mk = self.attn(x_norm, y_norm, pos_img, pos_txt, attn_mask, segment_data=segment_data)
 
         x = x + gate_msa_x * attn_x
         y = y + gate_msa_y * attn_y
@@ -451,23 +450,22 @@ class PixDiT_T2I(nn.Module):
             self.last_repa_tokens = None
             s = s0
 
-            with torch.enable_grad():
-                for i in range(min(self.patch_depth, local_config.layer_count)):
-                    s, y_emb, attn_mk = self.patch_blocks[i](s, y_emb, condition, pos, pos_txt, attn_mask_joint, segment_data=segment_data)
-                    if 0 < self.repa_encoder_index == (i + 1):
-                        self.last_repa_tokens = s
-                    
-                    # import os
-                    # attn_mk_disp = attn_mk.to(torch.float32)[-1,:].view(Hs, Ws).detach().cpu()
-                    # plt.imshow(attn_mk_disp, cmap="viridis")
-                    # plt.savefig(f"trash/{i}_{len(os.listdir('trash'))}.png")
-                    # plt.close()
+            for i in range(min(self.patch_depth, local_config.layer_count)):
+                s, y_emb, attn_mk = self.patch_blocks[i](s, y_emb, condition, pos, pos_txt, attn_mask_joint, segment_data=segment_data)
+                if 0 < self.repa_encoder_index == (i + 1):
+                    self.last_repa_tokens = s
+                
+                # import os
+                # attn_mk_disp = attn_mk.to(torch.float32)[-1,:].view(Hs, Ws).detach().cpu()
+                # plt.imshow(attn_mk_disp, cmap="viridis")
+                # plt.savefig(f"trash/{i}_{len(os.listdir('trash'))}.png")
+                # plt.close()
 
-                    # if segment_data is not None:
-                    #     segment_data["mask"][i] = attn_mk.view(B, Hs, Ws)
+                # if segment_data is not None:
+                #     segment_data["mask"][i] = attn_mk.view(B, Hs, Ws)
 
-                stack_features = lambda k: torch.stack([segment_data[k][i] for i in range(len(segment_data[k].keys()))], dim=1)
-                segment_data["all_vision_features"] = stack_features("vision_learned")
-                segment_data["vl_learned"] = stack_features("vl_learned")
-                segment_data["language_targets"] = stack_features("language_targets")
+            stack_features = lambda k: torch.stack([segment_data[k][i] for i in range(len(segment_data[k].keys()))], dim=1)
+            segment_data["all_vision_features"] = stack_features("vision_learned")
+            segment_data["vl_learned"] = stack_features("vl_learned")
+            segment_data["language_targets"] = stack_features("language_targets")
         return x

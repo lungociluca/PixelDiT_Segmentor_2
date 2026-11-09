@@ -45,6 +45,8 @@ from san import (
 )
 from san.data import build_detection_test_loader, build_detection_train_loader
 from san.utils import WandbWriter, setup_wandb
+from san.utils.amp import resolve_amp_dtype
+from san.utils.grad_accum_trainer import GradAccumTrainer
 
 import warnings
 
@@ -56,6 +58,30 @@ warnings.filterwarnings(
 os.environ["WANDB_MODE"] = "disabled"
 
 class Trainer(DefaultTrainer):
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        # Swap detectron2's SimpleTrainer/AMPTrainer for one that accumulates
+        # gradients and does clipping on the unscaled, accumulated gradient.
+        # model / data_loader / optimizer are the same objects DefaultTrainer built
+        # (model is already DDP-wrapped when running on several GPUs).
+        clip = cfg.SOLVER.CLIP_GRADIENTS
+        self._trainer = GradAccumTrainer(
+            self._trainer.model,
+            self._trainer.data_loader,
+            self._trainer.optimizer,
+            accum_steps=cfg.SOLVER.GRAD_ACCUM_STEPS,
+            amp_dtype=resolve_amp_dtype(cfg),
+            clip_type=clip.CLIP_TYPE if clip.ENABLED else "",
+            clip_value=clip.CLIP_VALUE,
+            clip_norm_type=clip.NORM_TYPE,
+        )
+        logging.getLogger("san").info(
+            "Gradient accumulation: %d micro-batch(es) of %d image(s) -> %d images per optimizer step",
+            cfg.SOLVER.GRAD_ACCUM_STEPS,
+            cfg.SOLVER.IMS_PER_BATCH,
+            cfg.SOLVER.IMS_PER_BATCH * cfg.SOLVER.GRAD_ACCUM_STEPS,
+        )
+
     def build_writers(self):
         writers = super().build_writers()
         # use wandb writer instead.
@@ -122,76 +148,20 @@ class Trainer(DefaultTrainer):
             if "learnable_token" in name and param.requires_grad
         ]
 
-        # assert len(token_params) > 0, \
-        #     "No trainable learnable_token parameter found."
+        assert len(token_params) > 0, "No trainable learnable_token parameter found."
 
-        # TODO
+        # Gradient clipping is applied in GradAccumTrainer.run_step (after the
+        # gradients are accumulated and unscaled), not wrapped into the optimizer.
         optimizer = torch.optim.AdamW(
             token_params,
             lr=cfg.SOLVER.BASE_LR,
             weight_decay=cfg.SOLVER.WEIGHT_DECAY,
         )
-
-        return optimizer
-
-        def maybe_add_full_model_gradient_clipping(optim):
-            # detectron2 doesn't have full model gradient clipping now
-            clip_norm_val = cfg.SOLVER.CLIP_GRADIENTS.CLIP_VALUE
-            enable = (
-                cfg.SOLVER.CLIP_GRADIENTS.ENABLED
-                and cfg.SOLVER.CLIP_GRADIENTS.CLIP_TYPE == "full_model"
-                and clip_norm_val > 0.0
-            )
-
-            class FullModelGradientClippingOptimizer(optim):
-                def step(self, closure=None):
-                    all_params = itertools.chain(
-                        *[x["params"] for x in self.param_groups]
-                    )
-                    torch.nn.utils.clip_grad_norm_(all_params, clip_norm_val)
-                    super().step(closure=closure)
-
-            return FullModelGradientClippingOptimizer if enable else optim
-
-        optimizer_type = cfg.SOLVER.OPTIMIZER
-        if optimizer_type == "SGD":
-            optimizer = maybe_add_full_model_gradient_clipping(torch.optim.SGD)(
-                params, cfg.SOLVER.BASE_LR, momentum=cfg.SOLVER.MOMENTUM
-            )
-        elif optimizer_type == "ADAMW":
-            optimizer = maybe_add_full_model_gradient_clipping(torch.optim.AdamW)(
-                params, cfg.SOLVER.BASE_LR
-            )
-        else:
-            raise NotImplementedError(f"no optimizer type {optimizer_type}")
-        if not cfg.SOLVER.CLIP_GRADIENTS.CLIP_TYPE == "full_model":
-            optimizer = maybe_add_gradient_clipping(cfg, optimizer)
-        # display the lr and wd of each param group in a table
-        optim_info = defaultdict(list)
-        total_params_size = 0
-        for group in optimizer.param_groups:
-            optim_info["Param Name"].append(group["param_name"])
-            optim_info["Param Shape"].append(
-                "X".join([str(x) for x in list(group["params"][0].shape)])
-            )
-            total_params_size += group["params"][0].numel()
-            optim_info["Lr"].append(group["lr"])
-            optim_info["Wd"].append(group["weight_decay"])
-        # Counting the number of parameters
-        optim_info["Param Name"].append("Total")
-        optim_info["Param Shape"].append("{:.2f}M".format(total_params_size / 1e6))
-        optim_info["Lr"].append("-")
-        optim_info["Wd"].append("-")
-        table = tabulate(
-            list(zip(*optim_info.values())),
-            headers=optim_info.keys(),
-            tablefmt="grid",
-            floatfmt=".2e",
-            stralign="center",
-            numalign="center",
+        logging.getLogger("san").info(
+            "Optimizer: AdamW over %d tensors / %.2fM trainable params",
+            len(token_params),
+            sum(p.numel() for p in token_params) / 1e6,
         )
-        logger = logging.getLogger("san")
-        logger.info("Optimizer Info:\n{}\n".format(table))
         return optimizer
 
     @classmethod

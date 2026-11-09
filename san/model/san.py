@@ -20,6 +20,7 @@ import json
 from .criterion import SetCriterion
 from .matcher import HungarianMatcher
 from .side_adapter import build_side_adapter_network
+from ..utils.amp import resolve_amp_dtype
 
 
 from t2i.diffusion.model.builder import build_model, get_tokenizer_and_text_encoder
@@ -161,6 +162,7 @@ class SAN(nn.Module):
         train_dataset_names: List[str],
         test_dataset_names: List[str],
         sem_seg_postprocess_before_inference: bool = False,
+        amp_dtype: Optional[torch.dtype] = None,
     ):
         super().__init__()
         self.size_divisibility = 16
@@ -197,6 +199,18 @@ class SAN(nn.Module):
 
         del self.tokenizer
         del self.text_encoder
+
+        # Store the frozen PixelDiT weights in the autocast dtype. Under fp32 weights,
+        # autocast keeps a half-precision copy of every weight during the forward pass,
+        # so this roughly removes 1.5x the backbone size from GPU memory. Trainable
+        # learnable_token* params stay fp32 for the optimizer. Done after the class
+        # embeddings above so those are still computed in fp32.
+        self.amp_dtype = amp_dtype
+        if amp_dtype is not None:
+            for p in self.model.parameters():
+                if not p.requires_grad:
+                    p.data = p.data.to(amp_dtype)
+            torch.cuda.empty_cache()
 
         if local_config.use_learned_tokens:
             self.learnable_token_language_weights = torch.load("learnable_token_language_weights.pt", weights_only=False)
@@ -258,6 +272,7 @@ class SAN(nn.Module):
             "train_dataset_names": list(cfg.DATASETS.TRAIN),
             "test_dataset_names": list(cfg.DATASETS.TEST),
             "sem_seg_postprocess_before_inference": cfg.MODEL.SAN.SEM_SEG_POSTPROCESS_BEFORE_INFERENCE,
+            "amp_dtype": resolve_amp_dtype(cfg),
         }
     
     @torch.no_grad()
@@ -380,9 +395,20 @@ class SAN(nn.Module):
         return mask_pred.sum(dim=1) if aggregate_layers else mask_pred
 
     def call_model(self, image_tensor, dataset_name):
+        # Autocast here too (not only in the training loop) because evaluation runs
+        # without it, and the frozen weights may be in half precision. Inside the
+        # trainer's autocast with the same dtype this is a no-op.
+        with torch.autocast(
+            "cuda", dtype=self.amp_dtype or torch.float32, enabled=self.amp_dtype is not None
+        ):
+            mask_logits, mask_pred = self._call_model(image_tensor, dataset_name)
+        return mask_logits.float(), mask_pred.float()
+
+    def _call_model(self, image_tensor, dataset_name):
         segment_data = {}
-        with torch.enable_grad():
-            self.run_diffusion_model(image_tensor, segment_data)
+        # Grad mode is left to the caller: on during training, off (torch.no_grad)
+        # during detectron2 evaluation, so no autograd graph is built at test time.
+        self.run_diffusion_model(image_tensor, segment_data)
 
         h, w = segment_data["hw"]
         visual_features = segment_data["all_vision_features"]
