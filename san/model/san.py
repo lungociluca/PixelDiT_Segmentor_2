@@ -1,4 +1,5 @@
 from typing import List
+import einops
 
 import open_clip
 import torch
@@ -186,8 +187,7 @@ class SAN(nn.Module):
                 self.class_labels[name], self.class_embs[name] = labels, self.class_embs[src]
                 continue
             embs = self.precompute_prompts(labels)
-            print("result", embs.shape)
-            exit(0)
+
             if name not in train_dataset_names:
                 embs = embs.cpu()
             self.class_labels[name], self.class_embs[name] = labels, embs
@@ -197,18 +197,12 @@ class SAN(nn.Module):
         del self.tokenizer
         del self.text_encoder
 
-        self.learnable_token_norm_weights = torch.nn.LayerNorm(local_config.no_vision_learnable_tokens)
-        if local_config.use_learned_tokens:
-            self.learnable_token_norm_weights.load_state_dict(torch.load("norm_weights.pt", weights_only=True))
-            self.learnable_token_norm_weights = self.learnable_token_norm_weights
-        self.learnable_token_norm_weights.to(local_config.device)
-
         if local_config.use_learned_tokens:
             self.learnable_token_language_weights = torch.load("learnable_token_language_weights.pt", weights_only=False)
             self.learnable_token_language_no_object = torch.load("learnable_token_language_no_object.pt", weights_only=False)
         else:
             self.learnable_token_language_weights = torch.nn.Embedding(300, 1).to(local_config.device)
-            self.learnable_token_language_no_object = torch.nn.Embedding(1, 2304).to(local_config.device)
+            self.learnable_token_language_no_object = torch.nn.Embedding(1, 1536).to(local_config.device)
         
 
     @classmethod
@@ -266,13 +260,14 @@ class SAN(nn.Module):
     
     @torch.no_grad()
     def precompute_prompts(self, labels: List[str]):
-        prompts = [local_config.default_prompt + " " + local_config.subprompt.format(target=t) for t in labels]
+        prompts = [local_config.subprompt.format(target=t) for t in labels]
         embs, emb_masks, tokens_count = self.embed_condition(prompts)
+        language_embs_list = []
+        extract_representative_emb = lambda emb, tok_count: emb[:, [tok_count-1], :]
         for i in range(embs.shape[0]):
             current_emb = embs[[i]]
             current_mask = emb_masks[[i]]
             tokens_count = tokens_count
-            # emb, emb_mask, tokens_count = self.embed_condition(prompts)
             model_kwargs = dict(data_info={"img_hw": 1024, "aspect_ratio": 1}, mask=current_mask) # TODO: hardcoded resolution
 
             dpm_solver = DPMS(
@@ -286,8 +281,10 @@ class SAN(nn.Module):
                 precompute_embs=True
             )
 
-            language_emb = dpm_solver.segment(torch.zeros(1), {})
-        return language_emb
+            language_embs_list.append(
+                extract_representative_emb(dpm_solver.segment(torch.zeros(1), {}), tokens_count[i])
+            )
+        return torch.stack(language_embs_list, dim=0)
 
     def embed_condition(self, prompts):
         caption_token = self.tokenizer(
@@ -330,11 +327,7 @@ class SAN(nn.Module):
         """(C, 1, 300, D) class token embeddings -> (C, 1, D) using learned token weights.
         Chunked so large vocabularies stored on CPU never sit on the GPU all at once."""
         device = language_weights.device
-        out = []
-        for i in range(0, language_tokens.shape[0], chunk_size):
-            chunk = language_tokens[i:i + chunk_size].to(device, non_blocking=True)
-            out.append((language_weights * chunk).sum(dim=-2))
-        return torch.cat(out, dim=0)
+        return language_tokens.to(device)
 
     def get_language_targets(self, dataset_name):
         weights = self.learnable_token_language_weights.weight
@@ -357,34 +350,40 @@ class SAN(nn.Module):
         # visual_tokens -> (B, layers, Q, D), language_targets -> (C, 1, D)
         B = visual_tokens.shape[0]
         visual_tokens = visual_tokens.sum(dim=1) # sum across layers TODO: try other ways of aggregating visual features for comparison with language
-        language_targets = torch.cat([language_targets, language_no_object[None,:,:]], dim=0).permute(1,2,0).expand(B, -1, -1)
+        language_targets = torch.cat([language_targets[:,0], language_no_object[None,:,:]], dim=0).permute(1,2,0).expand(B, -1, -1)
         visual_tokens = visual_tokens.permute(0,2,1)
         my_norm = lambda x,d: torch.nn.functional.normalize(x, dim=d)
         classes = my_norm(visual_tokens, 1).permute(0,2,1) @ my_norm(language_targets, 1)
         return classes
     
-    def call_model(self, image_tensor, dataset_name):
-        segment_data = {}
-        with torch.enable_grad():
-            self.run_diffusion_model(image_tensor, segment_data)
-        
-        visual_features = segment_data["all_vision_features"]
-        vl_features = segment_data["vl_learned"]
-
+    @staticmethod
+    def masks_from_tokens_and_dense_features(visual_features, aggregate_layers=True):
         learned_vision = visual_features[:,:,:local_config.no_vision_learnable_tokens,:]
         dense_vision = visual_features[:,:,local_config.no_vision_learnable_tokens:,:]
-        h, w = segment_data["hw"]
-
         my_norm = lambda x: x if not local_config.norm_before_dot else torch.nn.functional.normalize(x, dim=-1)
         mask_pred = my_norm(dense_vision) @ my_norm(learned_vision).permute(0, 1, 3, 2)
 
         # masks (b, l, p, t) * (b, l, 1, t)
-        # weighted sum to aggregate masks of all layers
-        mask_pred = self.learnable_token_norm_weights(mask_pred)
-        mask_pred = mask_pred.sum(dim=1)
+        return mask_pred.sum(dim=1) if aggregate_layers else mask_pred
+
+    def call_model(self, image_tensor, dataset_name):
+        segment_data = {}
+        with torch.enable_grad():
+            self.run_diffusion_model(image_tensor, segment_data)
+
+        h, w = segment_data["hw"]
+        visual_features = segment_data["all_vision_features"]
+        mask_pred = SAN.masks_from_tokens_and_dense_features(visual_features)
+
+        vl_features = segment_data["vl_learned"]
+        attn_bias = SAN.masks_from_tokens_and_dense_features(vl_features, aggregate_layers=False)
+        
+        language_features = segment_data["language_targets"]
+        my_norm = lambda x: x if not local_config.norm_before_dot else torch.nn.functional.normalize(x, dim=-1)
+        masked_vl_featues = my_norm(attn_bias.permute(0,1,3,2)) @ my_norm(einops.rearrange(language_features, "b l p h d -> b l p (h d)"))
 
         mask_logits = SAN.clasify_masks(
-            vl_features,
+            masked_vl_featues,
             self.get_language_targets(dataset_name),
             self.learnable_token_language_no_object.weight,
         )
@@ -401,8 +400,7 @@ class SAN(nn.Module):
             padding_constraints={"square_size": 1024},   # recent detectron2 versions
         )
         images_tensor = images.tensor
-        # print("image tensor stats", images_tensor.shape, images_tensor.min(), images_tensor.max(), images_tensor.mean())
-        # print("ids",  [x["file_name"]for x in batched_inputs])
+
         mask_logits, mask_preds = self.call_model(images_tensor, self._dataset_name(batched_inputs))
         if self.training:
             if "instances" in batched_inputs[0]:
