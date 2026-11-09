@@ -301,8 +301,6 @@ class SAN(nn.Module):
 
     @staticmethod
     def language_targets(language_tokens, language_weights, chunk_size=64):
-        """(C, 1, 300, D) class token embeddings -> (C, 1, D) using learned token weights.
-        Chunked so large vocabularies stored on CPU never sit on the GPU all at once."""
         device = language_weights.device
         out = []
         for i in range(0, language_tokens.shape[0], chunk_size):
