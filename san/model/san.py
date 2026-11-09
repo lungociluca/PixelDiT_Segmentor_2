@@ -1,4 +1,5 @@
 from typing import List
+import math
 import einops
 
 import open_clip
@@ -203,7 +204,14 @@ class SAN(nn.Module):
         else:
             self.learnable_token_language_weights = torch.nn.Embedding(300, 1).to(local_config.device)
             self.learnable_token_language_no_object = torch.nn.Embedding(1, 1536).to(local_config.device)
-        
+
+        self.learnable_token_logit_scale = nn.Parameter(
+            torch.tensor(math.log(1 / 0.07), device=local_config.device)
+        )
+        self.learnable_token_mask_scale = nn.Parameter(
+            torch.tensor(math.log(5.0), device=local_config.device)
+        )
+        self.learnable_token_mask_bias = nn.Parameter(torch.zeros((), device=local_config.device))
 
     @classmethod
     def from_config(cls, cfg):
@@ -261,9 +269,10 @@ class SAN(nn.Module):
     @torch.no_grad()
     def precompute_prompts(self, labels: List[str]):
         prompts = [local_config.subprompt.format(target=t) for t in labels]
-        embs, emb_masks, tokens_count = self.embed_condition(prompts)
+        embs, emb_masks, tokens_count = self.embed_condition(prompts, with_chi_window=False)
+        assert int(tokens_count.max()) <= embs.shape[2], "class prompt longer than 300 tokens"
         language_embs_list = []
-        extract_representative_emb = lambda emb, tok_count: emb[:, [tok_count-1], :]
+        extract_representative_emb = lambda emb, tok_count: emb[:, [int(tok_count) - 1], :]
         for i in range(embs.shape[0]):
             current_emb = embs[[i]]
             current_mask = emb_masks[[i]]
@@ -286,11 +295,12 @@ class SAN(nn.Module):
             )
         return torch.stack(language_embs_list, dim=0)
 
-    def embed_condition(self, prompts):
+    def embed_condition(self, prompts, with_chi_window=False):
+        max_length = 506 if with_chi_window else 300
         caption_token = self.tokenizer(
-            prompts, max_length=506, padding="max_length", truncation=True, return_tensors="pt"
+            prompts, max_length=max_length, padding="max_length", truncation=True, return_tensors="pt"
         ).to(local_config.device)
-        select_index = [0] + list(range(-300 + 1, 0))
+        select_index = [0] + list(range(-300 + 1, 0)) if with_chi_window else list(range(300))
         caption_embs_list = [self.text_encoder(caption_token.input_ids[[i]], caption_token.attention_mask[[i]])[0][:, None][
             :, :, select_index
         ] for i in range(caption_token.input_ids.shape[0])]
@@ -346,7 +356,7 @@ class SAN(nn.Module):
         return super().train(mode)
 
     @staticmethod
-    def clasify_masks(visual_tokens, language_targets, language_no_object):
+    def clasify_masks(visual_tokens, language_targets, language_no_object, logit_scale=None):
         # visual_tokens -> (B, layers, Q, D), language_targets -> (C, 1, D)
         B = visual_tokens.shape[0]
         visual_tokens = visual_tokens.sum(dim=1) # sum across layers TODO: try other ways of aggregating visual features for comparison with language
@@ -354,6 +364,9 @@ class SAN(nn.Module):
         visual_tokens = visual_tokens.permute(0,2,1)
         my_norm = lambda x,d: torch.nn.functional.normalize(x, dim=d)
         classes = my_norm(visual_tokens, 1).permute(0,2,1) @ my_norm(language_targets, 1)
+        if logit_scale is not None:
+            # clamp as in CLIP so the temperature can't blow up
+            classes = classes * logit_scale.exp().clamp(max=100.0)
         return classes
     
     @staticmethod
@@ -374,6 +387,10 @@ class SAN(nn.Module):
         h, w = segment_data["hw"]
         visual_features = segment_data["all_vision_features"]
         mask_pred = SAN.masks_from_tokens_and_dense_features(visual_features)
+        mask_pred = (
+            mask_pred * self.learnable_token_mask_scale.exp().clamp(max=100.0)
+            + self.learnable_token_mask_bias
+        )
 
         vl_features = segment_data["vl_learned"]
         attn_bias = SAN.masks_from_tokens_and_dense_features(vl_features, aggregate_layers=False)
@@ -386,6 +403,7 @@ class SAN(nn.Module):
             masked_vl_featues,
             self.get_language_targets(dataset_name),
             self.learnable_token_language_no_object.weight,
+            logit_scale=self.learnable_token_logit_scale,
         )
         B, P, L = mask_pred.shape
         return mask_logits, mask_pred.permute(0, 2, 1).view(B, L, h, w)
@@ -397,7 +415,6 @@ class SAN(nn.Module):
             images,
             self.size_divisibility,
             pad_value=-1.0,
-            padding_constraints={"square_size": 1024},   # recent detectron2 versions
         )
         images_tensor = images.tensor
 

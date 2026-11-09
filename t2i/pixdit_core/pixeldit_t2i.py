@@ -128,30 +128,31 @@ class MMDiTJointAttention(nn.Module):
         segment_data["vision_learned"][self.block_id] = self.learnable_token_vision_mlp(out_joint_l)
         
         ####################################################################################################
-        # vl 
-        all_vision_tokens_count = x.shape[1] + local_config.no_vision_learnable_tokens
-        qkv_x_l = self.qkv_x(
-            torch.cat([self.learnable_token_vl.weight.expand(B, -1, -1), x], dim=1)
-        ).reshape(B, all_vision_tokens_count, 3, self.num_heads, C // self.num_heads).permute(2, 0, 1, 3, 4)
-        qxl, kxl, vxl = qkv_x_l[0], qkv_x_l[1], qkv_x_l[2]
-        qxl = self.q_norm_x(qxl)
-        kxl = self.k_norm_x(kxl)
-        segment_data["language_targets"][self.block_id] = kxl[:,local_config.no_vision_learnable_tokens:,:,:]
+        # vl
+        if self.block_id == 0:
+            all_vision_tokens_count = x.shape[1] + local_config.no_vision_learnable_tokens
+            qkv_x_l = self.qkv_x(
+                torch.cat([self.learnable_token_vl.weight.expand(B, -1, -1), x], dim=1)
+            ).reshape(B, all_vision_tokens_count, 3, self.num_heads, C // self.num_heads).permute(2, 0, 1, 3, 4)
+            qxl, kxl, vxl = qkv_x_l[0], qkv_x_l[1], qkv_x_l[2]
+            qxl = self.q_norm_x(qxl)
+            kxl = self.k_norm_x(kxl)
+            segment_data["language_targets"][self.block_id] = kxl[:,local_config.no_vision_learnable_tokens:,:,:]
 
-        qxl = qxl.transpose(1, 2)
-        kxl = kxl.transpose(1, 2)
-        vxl = vxl.transpose(1, 2)
+            qxl = qxl.transpose(1, 2)
+            kxl = kxl.transpose(1, 2)
+            vxl = vxl.transpose(1, 2)
 
-        if local_config.use_vision_attention_bias:
-            attention_bias = torch.ones((all_vision_tokens_count, all_vision_tokens_count), dtype=torch.bool, device=local_config.device)
-            attention_bias[:, :local_config.weight_tokens] = False
-        else:
-            attention_bias = None
-        out_joint_l = F.scaled_dot_product_attention(qxl, kxl, vxl, dropout_p=0.0, attn_mask=attention_bias)
-        out_joint_l = out_joint_l.transpose(1, 2).reshape(B, all_vision_tokens_count, C)
-        out_joint_l = self.proj_x(out_joint_l)
+            if local_config.use_vision_attention_bias:
+                attention_bias = torch.ones((all_vision_tokens_count, all_vision_tokens_count), dtype=torch.bool, device=local_config.device)
+                attention_bias[:, :local_config.weight_tokens] = False
+            else:
+                attention_bias = None
+            out_joint_l = F.scaled_dot_product_attention(qxl, kxl, vxl, dropout_p=0.0, attn_mask=attention_bias)
+            out_joint_l = out_joint_l.transpose(1, 2).reshape(B, all_vision_tokens_count, C)
+            out_joint_l = self.proj_x(out_joint_l)
 
-        segment_data["vl_learned"][self.block_id] = self.learnable_token_vl_mlp(out_joint_l)
+            segment_data["vl_learned"][self.block_id] = self.learnable_token_vl_mlp(out_joint_l)
         
         ####################################################################################################
         
@@ -465,7 +466,7 @@ class PixDiT_T2I(nn.Module):
                     # if segment_data is not None:
                     #     segment_data["mask"][i] = attn_mk.view(B, Hs, Ws)
 
-                stack_features = lambda k: torch.stack([segment_data[k][i] for i in range(min(self.patch_depth, local_config.layer_count))], dim=1)
+                stack_features = lambda k: torch.stack([segment_data[k][i] for i in range(len(segment_data[k].keys()))], dim=1)
                 segment_data["all_vision_features"] = stack_features("vision_learned")
                 segment_data["vl_learned"] = stack_features("vl_learned")
                 segment_data["language_targets"] = stack_features("language_targets")
