@@ -219,10 +219,10 @@ class VLAlignmentProbe:
             img_scores = maps.topk(K, dim=0).values.mean(0)            # (k,)
 
             r = self._result(key)
-            r["img_scores"][classes] = img_scores.cpu().numpy()
+            r["img_scores"][classes] = img_scores.to(torch.float32).cpu().numpy()
             if gt.seg_classes:
                 pooled = F.normalize(gt.seg_weights @ Ib, dim=-1)      # (S, D)
-                r["seg_scores"][:, classes] = (pooled @ Tn.T).cpu().numpy()
+                r["seg_scores"][:, classes] = (pooled @ Tn.T).to(torch.float32).cpu().numpy()
                 col = {c: j for j, c in enumerate(classes)}
                 for s, c in enumerate(gt.seg_classes):
                     if c not in col:
