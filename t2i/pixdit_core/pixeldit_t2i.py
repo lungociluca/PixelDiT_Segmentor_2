@@ -138,6 +138,16 @@ class MMDiTJointAttention(nn.Module):
         qy = self.q_norm_y(qy)
         ky = self.k_norm_y(ky)
 
+        # Vision-language alignment probe (t2i/vl_stats). Features are taken after the
+        # per-head RMSNorm and before RoPE, shaped (B, N, heads, head_dim).
+        probe = segment_data.get("vl_probe") if segment_data is not None else None
+        if probe is not None:
+            probe(self.block_id, "q", qx, qy)
+            probe(self.block_id, "k", kx, ky)
+            probe(self.block_id, "v", vx, vy)
+            probe(self.block_id, "qk", qx, ky)   # image queries vs text keys (image -> text attention)
+            probe(self.block_id, "kq", kx, qy)   # image keys vs text queries (text -> image attention)
+
         attn_mk = torch.zeros((B, Nx), device=x.device, dtype=x.dtype)
         qx, kx = apply_rotary_emb(qx, kx, freqs_cis=pos_img)
         if pos_txt is not None:
@@ -168,6 +178,9 @@ class MMDiTJointAttention(nn.Module):
 
         out_x = self.proj_drop_x(self.proj_x(out_x))
         out_y = self.proj_drop_y(self.proj_y(out_y))
+
+        if probe is not None:
+            probe(self.block_id, "attn_out", out_x, out_y)
 
         return out_x, out_y, attn_mk
 
@@ -217,6 +230,10 @@ class MMDiTBlockT2I(nn.Module):
 
         x = x + gate_mlp_x * self.mlp_x(apply_adaln(self.norm_x2(x), shift_mlp_x, scale_mlp_x))
         y = y + gate_mlp_y * self.mlp_y(apply_adaln(self.norm_y2(y), shift_mlp_y, scale_mlp_y))
+
+        probe = segment_data.get("vl_probe") if segment_data is not None else None
+        if probe is not None:
+            probe(self.block_id, "block", x, y)   # residual stream after the full MMDiT block
         return x, y, attn_mk
 
 class PixDiT_T2I(nn.Module):
@@ -362,13 +379,19 @@ class PixDiT_T2I(nn.Module):
         pos = self.fetch_pos(Hs, Ws, x.device)
         x_patches = torch.nn.functional.unfold(x, kernel_size=self.patch_size, stride=self.patch_size).transpose(1, 2)
 
-        t_emb = self.t_embedder(t.view(-1)).view(B, -1, self.hidden_size)
+        t_emb = self.t_embedder(t.view(-1))
+        if t_emb.shape[0] == 1 and B > 1:   # a single timestep shared by the whole batch
+            t_emb = t_emb.expand(B, -1)
+        t_emb = t_emb.view(B, -1, self.hidden_size)
 
         if y.dim() != 3:
             raise ValueError("Text embedding y must be [B, L, D]")
         Ltxt = min(y.shape[1], max(1, self.txt_max_length - 1))
         y = y[:, :Ltxt, :]
-        y_emb = self.y_embedder(y.to(local_config.device, dtype=x.dtype)).view(1, Ltxt, self.hidden_size).expand((B, -1, -1))
+        # One prompt shared by the batch (as before), or one prompt per image (used by t2i/vl_stats).
+        y_emb = self.y_embedder(y.to(local_config.device, dtype=x.dtype)).view(-1, Ltxt, self.hidden_size)
+        if y_emb.shape[0] == 1:
+            y_emb = y_emb.expand((B, -1, -1))
         y_emb = y_emb + self.y_pos_embedding[:, :Ltxt, :].to(y_emb.dtype)
 
         condition = torch.nn.functional.silu(t_emb)
