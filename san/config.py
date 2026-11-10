@@ -44,6 +44,10 @@ def add_san_config(cfg):
     cfg.MODEL.SAN.MASK_WEIGHT = 5.0
     cfg.MODEL.SAN.TRAIN_NUM_POINTS = 112 * 112
     cfg.MODEL.SAN.NUM_CLASSES = 171
+    # Train the query class head as object / no-object only (all GT segments get
+    # label 0, NUM_CLASSES is ignored). Classes then come from the oracle at
+    # inference, so this requires ORACLE_CLASSES.ENABLED.
+    cfg.MODEL.SAN.CLASS_AGNOSTIC = True
     cfg.MODEL.SAN.OVERSAMPLE_RATIO = 3.0
     cfg.MODEL.SAN.IMPORTANCE_SAMPLE_RATIO = 0.75
     cfg.MODEL.SAN.CLIP_MODEL_NAME = "ViT-B/16"
@@ -73,18 +77,38 @@ def add_san_config(cfg):
     # Masks whose best match has IoU (or covered fraction, for "majority") below
     # this value are treated as "no object" and contribute nothing.
     cfg.MODEL.SAN.ORACLE_CLASSES.MIN_SCORE = 0.0
+    # Scale each mask's one-hot oracle class by its predicted objectness
+    # (softmax prob. of not being "no object"), as Mask2Former does with class
+    # scores. Without it every query votes with weight 1, including the ones the
+    # model has learned are empty.
+    cfg.MODEL.SAN.ORACLE_CLASSES.WEIGHT_BY_OBJECTNESS = True
+
+    # PixelDiT backbone
+    cfg.MODEL.PIXELDIT = CN()
+    # PixelDiT layers whose image tokens are passed to the side adapter:
+    # 0 = patch embedding, k = output of patch block k (1-based). Only blocks up to
+    # the deepest listed layer are run; FUSION_MAP refers to these indices.
+    cfg.MODEL.PIXELDIT.FEATURE_LAYERS = [1, 2, 3]
     # side adapter
     cfg.MODEL.SIDE_ADAPTER = CN()
-    cfg.MODEL.SIDE_ADAPTER.NAME = "RegionwiseSideAdapterNetwork"
+    # "PixelDiTSideAdapterNetwork": masks + objectness, fused with PixelDiT features.
+    # "RegionwiseSideAdapterNetwork": original SAN (needs the CLIP recognition head).
+    cfg.MODEL.SIDE_ADAPTER.NAME = "PixelDiTSideAdapterNetwork"
     cfg.MODEL.SIDE_ADAPTER.VIT_NAME = "vit_w240n6d8_patch16"
     cfg.MODEL.SIDE_ADAPTER.PRETRAINED = False
-    cfg.MODEL.SIDE_ADAPTER.IMAGE_SIZE = 640
+    # Size the side ViT's positional embedding is built for (resized otherwise).
+    cfg.MODEL.SIDE_ADAPTER.IMAGE_SIZE = 1024
     cfg.MODEL.SIDE_ADAPTER.DROP_PATH_RATE = 0.0
     cfg.MODEL.SIDE_ADAPTER.NUM_QUERIES = 100
     cfg.MODEL.SIDE_ADAPTER.FUSION_TYPE = "add"
-    cfg.MODEL.SIDE_ADAPTER.FUSION_MAP = ["0->0", "3->1", "6->2", "9->3"]
+    # "k->j": backbone layer k is added to the side ViT tokens before side block j.
+    # For PixelDiT, k indexes MODEL.PIXELDIT.FEATURE_LAYERS.
+    cfg.MODEL.SIDE_ADAPTER.FUSION_MAP = ["1->0", "2->1", "3->2"]
     cfg.MODEL.SIDE_ADAPTER.DEEP_SUPERVISION_IDXS = [7, 8]
 
+    # Mask decoder MLPs. PixelDiTSideAdapterNetwork uses EMBED_CHANNELS,
+    # MLP_CHANNELS and MLP_NUM_LAYERS; NUM_HEADS, NUM_LAYERS and RESCALE_ATTN_BIAS
+    # only apply to SAN's CLIP attention-bias branch.
     cfg.MODEL.SIDE_ADAPTER.ATTN_BIAS = CN()
     cfg.MODEL.SIDE_ADAPTER.ATTN_BIAS.NUM_HEADS = 12
     cfg.MODEL.SIDE_ADAPTER.ATTN_BIAS.NUM_LAYERS = 1

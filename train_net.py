@@ -142,25 +142,62 @@ class Trainer(DefaultTrainer):
 
     @classmethod
     def build_optimizer(cls, cfg, model):
-        token_params = [
-            param
-            for name, param in model.named_parameters()
-            if "learnable_token" in name and param.requires_grad
-        ]
+        # All trainable parameters (the frozen PixelDiT has requires_grad=False).
+        # Same grouping as upstream SAN: no weight decay on norms, and
+        # WEIGHT_DECAY_EMBED on positional embeddings and query embeddings.
+        norm_module_types = (
+            torch.nn.BatchNorm1d,
+            torch.nn.BatchNorm2d,
+            torch.nn.BatchNorm3d,
+            torch.nn.SyncBatchNorm,
+            torch.nn.GroupNorm,
+            torch.nn.InstanceNorm1d,
+            torch.nn.InstanceNorm2d,
+            torch.nn.InstanceNorm3d,
+            torch.nn.LayerNorm,
+            torch.nn.LocalResponseNorm,
+        )
+        embed_names = cfg.SOLVER.WEIGHT_DECAY_EMBED_GROUP
 
-        assert len(token_params) > 0, "No trainable learnable_token parameter found."
+        params: List[Dict[str, Any]] = []
+        memo: Set[torch.nn.parameter.Parameter] = set()
+        for module_name, module in model.named_modules():
+            for param_name, value in module.named_parameters(recurse=False):
+                if not value.requires_grad or value in memo:
+                    continue
+                memo.add(value)
+                lr = cfg.SOLVER.BASE_LR
+                weight_decay = cfg.SOLVER.WEIGHT_DECAY
+                if "side_adapter_network" in module_name:
+                    lr = lr * cfg.SOLVER.BACKBONE_MULTIPLIER
+                if any(x in param_name for x in embed_names):
+                    weight_decay = cfg.SOLVER.WEIGHT_DECAY_EMBED
+                if isinstance(module, norm_module_types):
+                    weight_decay = cfg.SOLVER.WEIGHT_DECAY_NORM
+                if isinstance(module, torch.nn.Embedding):
+                    weight_decay = cfg.SOLVER.WEIGHT_DECAY_EMBED
+                params.append(
+                    {
+                        "params": [value],
+                        "lr": lr,
+                        "weight_decay": weight_decay,
+                        "param_name": ".".join([module_name, param_name]),
+                    }
+                )
+
+        assert len(params) > 0, "No trainable parameters found."
 
         # Gradient clipping is applied in GradAccumTrainer.run_step (after the
         # gradients are accumulated and unscaled), not wrapped into the optimizer.
         optimizer = torch.optim.AdamW(
-            token_params,
+            params,
             lr=cfg.SOLVER.BASE_LR,
             weight_decay=cfg.SOLVER.WEIGHT_DECAY,
         )
         logging.getLogger("san").info(
             "Optimizer: AdamW over %d tensors / %.2fM trainable params",
-            len(token_params),
-            sum(p.numel() for p in token_params) / 1e6,
+            len(params),
+            sum(g["params"][0].numel() for g in params) / 1e6,
         )
         return optimizer
 

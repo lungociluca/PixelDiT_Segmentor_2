@@ -2,7 +2,8 @@ from typing import List
 
 import open_clip
 import torch
-from detectron2.config import configurable
+from detectron2.config import CfgNode, configurable
+from detectron2.layers import ShapeSpec
 from detectron2.modeling import META_ARCH_REGISTRY
 from detectron2.modeling.postprocessing import sem_seg_postprocess
 from detectron2.structures import ImageList
@@ -158,6 +159,9 @@ class SAN(nn.Module):
         self,
         *,
         criterion: SetCriterion,
+        side_adapter_cfg: CfgNode,
+        feature_layers: List[int],
+        class_agnostic: bool,
         train_dataset_names: List[str],
         test_dataset_names: List[str],
         sem_seg_postprocess_before_inference: bool = False,
@@ -166,6 +170,7 @@ class SAN(nn.Module):
         oracle_assignment: str = "max_iou",
         oracle_mask_threshold: float = 0.5,
         oracle_min_score: float = 0.0,
+        oracle_weight_by_objectness: bool = True,
     ):
         super().__init__()
         self.size_divisibility = 16
@@ -177,8 +182,29 @@ class SAN(nn.Module):
         self.oracle_assignment = oracle_assignment
         self.oracle_mask_threshold = oracle_mask_threshold
         self.oracle_min_score = oracle_min_score
+        self.oracle_weight_by_objectness = oracle_weight_by_objectness
+
+        self.class_agnostic = class_agnostic
+        if class_agnostic and not oracle_classes:
+            raise ValueError(
+                "MODEL.SAN.CLASS_AGNOSTIC predicts no classes, so it needs "
+                "MODEL.SAN.ORACLE_CLASSES.ENABLED to label the masks at inference."
+            )
+
+        # PixelDiT layers fed to the side adapter (0 = patch embedding, k = block k).
+        # Only blocks up to the deepest one are built and run.
+        self.feature_layers = sorted(set(int(k) for k in feature_layers))
+        if not self.feature_layers or self.feature_layers[0] < 0:
+            raise ValueError(f"MODEL.PIXELDIT.FEATURE_LAYERS must be non-negative, got {feature_layers}")
+        local_config.layer_count = self.feature_layers[-1]
 
         self.model, self.tokenizer, self.text_encoder = get_model()
+        num_blocks = len(self.model.core.patch_blocks)
+        if self.feature_layers[-1] > num_blocks:
+            raise ValueError(
+                f"MODEL.PIXELDIT.FEATURE_LAYERS {self.feature_layers} goes deeper than the "
+                f"{num_blocks} PixelDiT patch blocks."
+            )
 
         # The diffusion model is always conditioned on the dataset-agnostic default prompt.
         default_emb, default_mask, default_tokens = self.embed_condition([local_config.default_prompt])
@@ -206,7 +232,12 @@ class SAN(nn.Module):
                     p.data = p.data.to(amp_dtype)
             torch.cuda.empty_cache()
 
-        # TODO: build the segmentation head here.
+        # Trainable side adapter (kept in fp32; autocast handles the compute dtype).
+        hidden_size = self.model.core.hidden_size
+        self.side_adapter_network = build_side_adapter_network(
+            side_adapter_cfg,
+            {k: ShapeSpec(channels=hidden_size) for k in self.feature_layers},
+        )
 
     @classmethod
     def from_config(cls, cfg):
@@ -237,8 +268,9 @@ class SAN(nn.Module):
         weight_dict.update(aux_weight_dict)
         losses = ["labels", "masks"]
 
+        class_agnostic = cfg.MODEL.SAN.CLASS_AGNOSTIC
         criterion = SetCriterion(
-            num_classes=cfg.MODEL.SAN.NUM_CLASSES,
+            num_classes=1 if class_agnostic else cfg.MODEL.SAN.NUM_CLASSES,
             matcher=matcher,
             weight_dict=weight_dict,
             eos_coef=no_object_weight,
@@ -250,6 +282,9 @@ class SAN(nn.Module):
         ## end of copy
         return {
             "criterion": criterion,
+            "side_adapter_cfg": cfg,
+            "feature_layers": list(cfg.MODEL.PIXELDIT.FEATURE_LAYERS),
+            "class_agnostic": class_agnostic,
             "train_dataset_names": list(cfg.DATASETS.TRAIN),
             "test_dataset_names": list(cfg.DATASETS.TEST),
             "sem_seg_postprocess_before_inference": cfg.MODEL.SAN.SEM_SEG_POSTPROCESS_BEFORE_INFERENCE,
@@ -258,6 +293,7 @@ class SAN(nn.Module):
             "oracle_assignment": cfg.MODEL.SAN.ORACLE_CLASSES.ASSIGNMENT,
             "oracle_mask_threshold": cfg.MODEL.SAN.ORACLE_CLASSES.MASK_THRESHOLD,
             "oracle_min_score": cfg.MODEL.SAN.ORACLE_CLASSES.MIN_SCORE,
+            "oracle_weight_by_objectness": cfg.MODEL.SAN.ORACLE_CLASSES.WEIGHT_BY_OBJECTNESS,
         }
     
     def embed_condition(self, prompts, with_chi_window=False):
@@ -275,7 +311,9 @@ class SAN(nn.Module):
         return caption_embs, emb_masks, tokens_count
     
     def run_diffusion_model(self, image, segment_data):
-        # TODO
+        """One forward pass of the frozen PixelDiT on the clean image at the fixed
+        timestep local_config.timestep, conditioned on the default prompt. Fills
+        segment_data["hw"] and segment_data["features"] (see PixDiT_T2I.forward)."""
         emb = self.default_emb
         emb_mask = self.default_emb_mask
         tokens_count = self.default_tokens_count
@@ -304,25 +342,34 @@ class SAN(nn.Module):
         with torch.autocast(
             "cuda", dtype=self.amp_dtype or torch.float32, enabled=self.amp_dtype is not None
         ):
-            mask_logits, mask_pred = self._call_model(image_tensor, dataset_name)
-        return mask_logits.float(), mask_pred.float()
+            mask_logits, mask_preds = self._call_model(image_tensor, dataset_name)
+        return [x.float() for x in mask_logits], [x.float() for x in mask_preds]
 
     def _call_model(self, image_tensor, dataset_name):
-        """Run the frozen backbone and the segmentation head.
+        """Run the frozen backbone and the side adapter.
 
-        Must return:
-          mask_logits: (B, Q, C + 1) class logits per mask, last column = no object
-          mask_pred:   (B, Q, h, w) mask logits on the patch grid
+        Returns two lists with one entry per deep-supervision block of the side
+        adapter during training (the last entry is the final prediction), and a
+        single entry at inference:
+          mask_logits: (B, Q, K + 1) class logits per mask, last column = no object
+                       (K = 1 when MODEL.SAN.CLASS_AGNOSTIC)
+          mask_preds:  (B, Q, h, w) mask logits on the patch grid
         """
-        segment_data = {}
-        # Grad mode is left to the caller: on during training, off (torch.no_grad)
-        # during detectron2 evaluation, so no autograd graph is built at test time.
-        self.run_diffusion_model(image_tensor, segment_data)
+        segment_data = {"feature_layers": self.feature_layers}
+        # The backbone is frozen and nothing before it is trained, so no autograd
+        # graph is needed through it, even during training.
+        with torch.no_grad():
+            self.run_diffusion_model(image_tensor, segment_data)
 
         h, w = segment_data["hw"]
-        patch_features = segment_data["patch_features"]  # (B, layers, h*w, hidden)
-
-        raise NotImplementedError("Segmentation head not implemented yet.")
+        # {layer: (B, h*w, hidden)} -> {layer: (B, hidden, h, w)}. fp32 so the
+        # fusion LayerNorm statistics are not computed in half precision.
+        backbone_features = {
+            k: v.detach().float().transpose(1, 2).reshape(v.shape[0], v.shape[-1], h, w)
+            for k, v in segment_data["features"].items()
+        }
+        mask_preds, mask_logits = self.side_adapter_network(image_tensor, backbone_features)
+        return mask_logits, mask_preds
 
     def forward(self, batched_inputs):
         images = [x["image"].to(local_config.device).float() / 255.0 for x in batched_inputs]
@@ -343,17 +390,17 @@ class SAN(nn.Module):
             else:
                 targets = None
             outputs = {
-                "pred_logits": mask_logits,
-                "pred_masks": mask_preds,
-                # "aux_outputs": [
-                #     {
-                #         "pred_logits": aux_pred_logits,
-                #         "pred_masks": aux_pred_masks,
-                #     }
-                #     for aux_pred_logits, aux_pred_masks in zip(
-                #         mask_logits[:-1], mask_preds[:-1]
-                #     )
-                # ],
+                "pred_logits": mask_logits[-1],
+                "pred_masks": mask_preds[-1],
+                "aux_outputs": [
+                    {
+                        "pred_logits": aux_pred_logits,
+                        "pred_masks": aux_pred_masks,
+                    }
+                    for aux_pred_logits, aux_pred_masks in zip(
+                        mask_logits[:-1], mask_preds[:-1]
+                    )
+                ],
             }
 
             losses = self.criterion(outputs, targets)
@@ -366,9 +413,8 @@ class SAN(nn.Module):
                     losses.pop(k)
             return losses
         else:
-            # mask_preds = mask_preds[-1]
-            # mask_logits = mask_logits[-1]
-            # torch.cuda.empty_cache()
+            mask_preds = mask_preds[-1]
+            mask_logits = mask_logits[-1]
             # Inference
             mask_preds = F.interpolate(
                 mask_preds,
@@ -388,12 +434,17 @@ class SAN(nn.Module):
                     # Replace the predicted class scores with one-hot GT classes.
                     # Matching is done at the network input resolution (unpadded),
                     # which is the resolution of the GT the test mapper provides.
-                    mask_cls_result = retry_if_cuda_oom(self.oracle_mask_classification)(
+                    oracle = retry_if_cuda_oom(self.oracle_mask_classification)(
                         mask_pred_result[:, : image_size[0], : image_size[1]],
                         self._gt_sem_seg(input_per_image, image_size),
                         num_classes=len(self.class_labels[dataset_name]),
                         ignore_label=self._ignore_label(dataset_name),
                     )
+                    if self.oracle_weight_by_objectness:
+                        # P(mask is an object) = 1 - P(no object).
+                        objectness = F.softmax(mask_cls_result.float(), dim=-1)[:, :-1].sum(-1)
+                        oracle = oracle * objectness[:, None]
+                    mask_cls_result = oracle
 
                 if self.sem_seg_postprocess_before_inference:
                     mask_pred_result = retry_if_cuda_oom(sem_seg_postprocess)(
@@ -433,9 +484,12 @@ class SAN(nn.Module):
                 device=gt_masks.device,
             )
             padded_masks[:, : gt_masks.shape[1], : gt_masks.shape[2]] = gt_masks
+            labels = targets_per_image.gt_classes
+            if self.class_agnostic:
+                labels = torch.zeros_like(labels)  # every GT segment is "object"
             new_targets.append(
                 {
-                    "labels": targets_per_image.gt_classes,
+                    "labels": labels,
                     "masks": padded_masks,
                 }
             )

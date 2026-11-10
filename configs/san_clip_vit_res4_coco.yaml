@@ -4,5 +4,14 @@ MODEL:
   SAN:
     CLIP_RESOLUTION: 1.0
     ASYMETRIC_INPUT: False   # otherwise the backbone branch gets a 512×512 copy
+  PIXELDIT:
+    # 0 = patch embedding, k = output of PixelDiT patch block k
+    FEATURE_LAYERS: [1, 2, 3]
+  SIDE_ADAPTER:
+    NAME: "PixelDiTSideAdapterNetwork"
+    IMAGE_SIZE: 1024
+    # "PixelDiT layer -> side ViT block it is added before"
+    FUSION_MAP: ["1->0", "2->1", "3->2"]
+    DEEP_SUPERVISION_IDXS: [7, 8]
 SOLVER:
   BACKBONE_MULTIPLIER: 1.0

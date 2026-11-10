@@ -275,10 +275,27 @@ class PixDiT_T2I(nn.Module):
         y_emb = y_emb + self.y_pos_embedding[:, :Ltxt, :].to(y_emb.dtype)
 
         condition = torch.nn.functional.silu(t_emb)
+        num_blocks = min(self.patch_depth, local_config.layer_count, len(self.patch_blocks))
+        tap_layers = None
         if segment_data is not None:
-            # Feature hook for downstream heads: patch-grid size and the image
-            # tokens after every patch block, stacked as (B, layers, Hs*Ws, hidden).
+            # Feature hook for downstream heads: the patch-grid size, plus image tokens
+            # (B, Hs*Ws, hidden) for every layer in segment_data["feature_layers"]
+            # (0 = patch embedding, k = output of patch block k), returned as
+            # segment_data["features"] = {k: tensor}. Without "feature_layers", the
+            # outputs of all run blocks are stacked in segment_data["patch_features"]
+            # as (B, layers, Hs*Ws, hidden), as before.
             segment_data["hw"] = (Hs, Ws)
+            tap_layers = segment_data.get("feature_layers")
+            if tap_layers is not None:
+                tap_layers = sorted(set(int(k) for k in tap_layers))
+                if tap_layers and not 0 <= tap_layers[0] <= tap_layers[-1] <= num_blocks:
+                    raise ValueError(
+                        f"feature_layers {tap_layers} must lie in 0..{num_blocks} "
+                        f"(local_config.layer_count={local_config.layer_count}, patch_depth={self.patch_depth})"
+                    )
+                # Blocks deeper than the last tapped layer are not needed.
+                num_blocks = tap_layers[-1] if tap_layers else 0
+                features = {}
             patch_features = []
 
         if s is None:
@@ -297,14 +314,21 @@ class PixDiT_T2I(nn.Module):
                     attn_mask_joint = torch.cat([pad[:, :Ltxt], pad_img], dim=1).view(B, 1, 1, Ltxt + L)
             self.last_repa_tokens = None
             s = s0
+            if tap_layers is not None and 0 in tap_layers:
+                features[0] = s0
 
-            for i in range(min(self.patch_depth, local_config.layer_count)):
+            for i in range(num_blocks):
                 s, y_emb = self.patch_blocks[i](s, y_emb, condition, pos, pos_txt, attn_mask_joint)
                 if 0 < self.repa_encoder_index == (i + 1):
                     self.last_repa_tokens = s
-                if segment_data is not None:
+                if tap_layers is not None:
+                    if (i + 1) in tap_layers:
+                        features[i + 1] = s
+                elif segment_data is not None:
                     patch_features.append(s)
 
-            if segment_data is not None:
+            if tap_layers is not None:
+                segment_data["features"] = features
+            elif segment_data is not None:
                 segment_data["patch_features"] = torch.stack(patch_features, dim=1)
         return x
