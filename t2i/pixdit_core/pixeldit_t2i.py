@@ -271,7 +271,12 @@ class PixDiT_T2I(nn.Module):
             raise ValueError("Text embedding y must be [B, L, D]")
         Ltxt = min(y.shape[1], self.txt_max_length)  # same as upstream: keep all 300 tokens
         y = y[:, :Ltxt, :]
-        y_emb = self.y_embedder(y.to(local_config.device, dtype=x.dtype)).view(1, Ltxt, self.hidden_size).expand((B, -1, -1))
+        y_emb = self.y_embedder(y.to(local_config.device, dtype=x.dtype))
+        if y_emb.shape[0] == 1:
+            # One prompt shared by the whole image batch (the segmentation pipeline's default).
+            y_emb = y_emb.expand((B, -1, -1))
+        elif y_emb.shape[0] != B:
+            raise ValueError(f"Got {y_emb.shape[0]} prompts for a batch of {B} images; expected 1 or {B}")
         y_emb = y_emb + self.y_pos_embedding[:, :Ltxt, :].to(y_emb.dtype)
 
         condition = torch.nn.functional.silu(t_emb)
