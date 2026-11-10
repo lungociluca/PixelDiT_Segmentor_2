@@ -163,11 +163,21 @@ class SAN(nn.Module):
         test_dataset_names: List[str],
         sem_seg_postprocess_before_inference: bool = False,
         amp_dtype: Optional[torch.dtype] = None,
+        oracle_classes: bool = False,
+        oracle_assignment: str = "max_iou",
+        oracle_mask_threshold: float = 0.5,
+        oracle_min_score: float = 0.0,
     ):
         super().__init__()
         self.size_divisibility = 16
         self.sem_seg_postprocess_before_inference = sem_seg_postprocess_before_inference
         self.criterion = criterion
+
+        assert oracle_assignment in ("max_iou", "majority"), oracle_assignment
+        self.oracle_classes = oracle_classes
+        self.oracle_assignment = oracle_assignment
+        self.oracle_mask_threshold = oracle_mask_threshold
+        self.oracle_min_score = oracle_min_score
 
         self.model, self.tokenizer, self.text_encoder = get_model()
 
@@ -227,6 +237,14 @@ class SAN(nn.Module):
         )
         self.learnable_token_mask_bias = nn.Parameter(torch.zeros((), device=local_config.device))
 
+        # Learned weighted sum of the per-layer masks. Weights are softmax(logits) * L,
+        # so they stay positive and sum to L; zero-initialized logits reproduce the
+        # previous plain sum exactly (also when loading checkpoints without this param).
+        self.num_mask_layers = local_config.layer_count
+        self.learnable_token_mask_layer_logits = nn.Parameter(
+            torch.zeros(self.num_mask_layers, device=local_config.device)
+        )
+
     @classmethod
     def from_config(cls, cfg):
         ## copied from maskformer2
@@ -273,6 +291,10 @@ class SAN(nn.Module):
             "test_dataset_names": list(cfg.DATASETS.TEST),
             "sem_seg_postprocess_before_inference": cfg.MODEL.SAN.SEM_SEG_POSTPROCESS_BEFORE_INFERENCE,
             "amp_dtype": resolve_amp_dtype(cfg),
+            "oracle_classes": cfg.MODEL.SAN.ORACLE_CLASSES.ENABLED,
+            "oracle_assignment": cfg.MODEL.SAN.ORACLE_CLASSES.ASSIGNMENT,
+            "oracle_mask_threshold": cfg.MODEL.SAN.ORACLE_CLASSES.MASK_THRESHOLD,
+            "oracle_min_score": cfg.MODEL.SAN.ORACLE_CLASSES.MIN_SCORE,
         }
     
     @torch.no_grad()
@@ -384,15 +406,28 @@ class SAN(nn.Module):
             classes = classes * logit_scale.exp().clamp(max=100.0)
         return classes
     
+    def mask_layer_weights(self):
+        """(L,) positive per-layer weights summing to L."""
+        logits = self.learnable_token_mask_layer_logits.float()
+        return logits.softmax(dim=0) * logits.numel()
+
     @staticmethod
-    def masks_from_tokens_and_dense_features(visual_features, aggregate_layers=True):
+    def masks_from_tokens_and_dense_features(visual_features, aggregate_layers=True, layer_weights=None):
         learned_vision = visual_features[:,:,:local_config.no_vision_learnable_tokens,:]
         dense_vision = visual_features[:,:,local_config.no_vision_learnable_tokens:,:]
         my_norm = lambda x: x if not local_config.norm_before_dot else torch.nn.functional.normalize(x, dim=-1)
         mask_pred = my_norm(dense_vision) @ my_norm(learned_vision).permute(0, 1, 3, 2)
 
-        # masks (b, l, p, t) * (b, l, 1, t)
-        return mask_pred.sum(dim=1) if aggregate_layers else mask_pred
+        # masks (b, l, p, t)
+        if not aggregate_layers:
+            return mask_pred
+        if layer_weights is None:
+            return mask_pred.sum(dim=1)
+        assert layer_weights.numel() == mask_pred.shape[1], (
+            f"{layer_weights.numel()} layer weights for {mask_pred.shape[1]} layers"
+        )
+        # weighted sum over layers: (b, l, p, t) x (l,) -> (b, p, t)
+        return torch.einsum("blpt,l->bpt", mask_pred, layer_weights.to(mask_pred.dtype))
 
     def call_model(self, image_tensor, dataset_name):
         # Autocast here too (not only in the training loop) because evaluation runs
@@ -412,7 +447,9 @@ class SAN(nn.Module):
 
         h, w = segment_data["hw"]
         visual_features = segment_data["all_vision_features"]
-        mask_pred = SAN.masks_from_tokens_and_dense_features(visual_features)
+        mask_pred = SAN.masks_from_tokens_and_dense_features(
+            visual_features, layer_weights=self.mask_layer_weights()
+        )
         mask_pred = (
             mask_pred * self.learnable_token_mask_scale.exp().clamp(max=100.0)
             + self.learnable_token_mask_bias
@@ -444,7 +481,8 @@ class SAN(nn.Module):
         )
         images_tensor = images.tensor
 
-        mask_logits, mask_preds = self.call_model(images_tensor, self._dataset_name(batched_inputs))
+        dataset_name = self._dataset_name(batched_inputs)
+        mask_logits, mask_preds = self.call_model(images_tensor, dataset_name)
         if self.training:
             if "instances" in batched_inputs[0]:
                 gt_instances = [x["instances"].to(local_config.device) for x in batched_inputs]
@@ -493,13 +531,24 @@ class SAN(nn.Module):
                 width = input_per_image.get("width", image_size[1])
                 processed_results.append({})
 
+                if self.oracle_classes:
+                    # Replace the predicted class scores with one-hot GT classes.
+                    # Matching is done at the network input resolution (unpadded),
+                    # which is the resolution of the GT the test mapper provides.
+                    mask_cls_result = retry_if_cuda_oom(self.oracle_mask_classification)(
+                        mask_pred_result[:, : image_size[0], : image_size[1]],
+                        self._gt_sem_seg(input_per_image, image_size),
+                        num_classes=len(self.class_labels[dataset_name]),
+                        ignore_label=self._ignore_label(dataset_name),
+                    )
+
                 if self.sem_seg_postprocess_before_inference:
                     mask_pred_result = retry_if_cuda_oom(sem_seg_postprocess)(
                         mask_pred_result, image_size, height, width
                     )
                     mask_cls_result = mask_cls_result.to(mask_pred_result)
                 r = retry_if_cuda_oom(self.semantic_inference)(
-                    mask_cls_result, mask_pred_result
+                    mask_cls_result, mask_pred_result, cls_are_probs=self.oracle_classes
                 )
                 if not self.sem_seg_postprocess_before_inference:
                     r = retry_if_cuda_oom(sem_seg_postprocess)(
@@ -539,11 +588,72 @@ class SAN(nn.Module):
             )
         return new_targets
 
-    def semantic_inference(self, mask_cls, mask_pred):
-        mask_cls = F.softmax(mask_cls, dim=-1)[..., :-1]
+    def semantic_inference(self, mask_cls, mask_pred, cls_are_probs=False):
+        # cls_are_probs: mask_cls is already (Q, C) class probabilities without the
+        # no-object column (oracle mode), so skip the softmax / no-object removal.
+        if not cls_are_probs:
+            mask_cls = F.softmax(mask_cls, dim=-1)[..., :-1]
         mask_pred = mask_pred.sigmoid()
         semseg = torch.einsum("qc,qhw->chw", mask_cls, mask_pred)
         return semseg
+
+    # ------------------------------------------------------------------ oracle
+    @staticmethod
+    def _ignore_label(dataset_name):
+        return getattr(MetadataCatalog.get(dataset_name), "ignore_label", 255)
+
+    def _gt_sem_seg(self, input_per_image, image_size):
+        """GT semantic map (H, W) at the unpadded network-input resolution."""
+        if "sem_seg" not in input_per_image:
+            raise KeyError(
+                "MODEL.SAN.ORACLE_CLASSES.ENABLED needs the ground truth at inference, but "
+                "the test mapper did not provide 'sem_seg'. Make sure the test dataset "
+                "dicts have 'sem_seg_file_name'."
+            )
+        gt = input_per_image["sem_seg"].to(local_config.device)
+        if tuple(gt.shape[-2:]) != tuple(image_size):
+            gt = F.interpolate(
+                gt[None, None].float(), size=tuple(image_size), mode="nearest"
+            )[0, 0].long()
+        return gt
+
+    @torch.no_grad()
+    def oracle_mask_classification(self, mask_pred, sem_seg_gt, num_classes, ignore_label):
+        """Assign each predicted mask the GT class it overlaps best.
+
+        mask_pred:  (Q, H, W) mask logits.
+        sem_seg_gt: (H, W) GT class ids, `ignore_label` for unlabeled pixels.
+        Returns (Q, C) one-hot class probabilities; masks with no (sufficient)
+        overlap with any labeled GT segment get an all-zero row (= no object).
+        """
+        Q = mask_pred.shape[0]
+        oracle = torch.zeros(Q, num_classes, device=mask_pred.device, dtype=torch.float32)
+
+        valid = (sem_seg_gt != ignore_label) & (sem_seg_gt >= 0) & (sem_seg_gt < num_classes)
+        gt_classes = torch.unique(sem_seg_gt[valid])
+        if gt_classes.numel() == 0:
+            return oracle
+
+        # Binarized predicted masks, restricted to labeled pixels so that unlabeled
+        # regions neither help nor hurt the matching.
+        pred = (mask_pred.float().sigmoid() > self.oracle_mask_threshold) & valid[None]
+        pred = pred.flatten(1).float()                                           # (Q, P)
+        gt = (sem_seg_gt[None] == gt_classes[:, None, None]).flatten(1).float()  # (K, P)
+
+        # fp32 on purpose: pixel counts overflow fp16.
+        inter = pred @ gt.T                                                      # (Q, K)
+        pred_area = pred.sum(1, keepdim=True)                                    # (Q, 1)
+        if self.oracle_assignment == "max_iou":
+            union = pred_area + gt.sum(1)[None] - inter
+            score = inter / union.clamp(min=1)
+        else:  # "majority": fraction of the mask's pixels lying on each GT class
+            score = inter / pred_area.clamp(min=1)
+
+        best_score, best_k = score.max(dim=1)
+        best_inter = inter.gather(1, best_k[:, None]).squeeze(1)
+        keep = (best_inter > 0) & (best_score >= self.oracle_min_score)
+        oracle[keep, gt_classes[best_k[keep]]] = 1.0
+        return oracle
 
     @property
     def device(self):

@@ -60,6 +60,19 @@ def add_san_config(cfg):
     cfg.MODEL.SAN.CLIP_RESOLUTION = 0.5
 
     cfg.MODEL.SAN.SEM_SEG_POSTPROCESS_BEFORE_INFERENCE = True
+    # Oracle mask classification (inference only): replace the predicted class
+    # scores of every mask with the ground-truth class it overlaps best, so that
+    # evaluation measures only the quality of the class-agnostic masks.
+    cfg.MODEL.SAN.ORACLE_CLASSES = CN()
+    cfg.MODEL.SAN.ORACLE_CLASSES.ENABLED = True
+    # "max_iou": GT segment with the highest IoU with the binarized mask.
+    # "majority": GT class covering most of the binarized mask's pixels.
+    cfg.MODEL.SAN.ORACLE_CLASSES.ASSIGNMENT = "max_iou"
+    # Threshold on sigmoid(mask logits) used to binarize masks for the matching.
+    cfg.MODEL.SAN.ORACLE_CLASSES.MASK_THRESHOLD = 0.5
+    # Masks whose best match has IoU (or covered fraction, for "majority") below
+    # this value are treated as "no object" and contribute nothing.
+    cfg.MODEL.SAN.ORACLE_CLASSES.MIN_SCORE = 0.0
     # side adapter
     cfg.MODEL.SIDE_ADAPTER = CN()
     cfg.MODEL.SIDE_ADAPTER.NAME = "RegionwiseSideAdapterNetwork"
