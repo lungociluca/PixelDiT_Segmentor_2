@@ -1,6 +1,4 @@
 from typing import List
-import math
-import einops
 
 import open_clip
 import torch
@@ -137,9 +135,10 @@ def get_model():
     model = build_model(
         config.model.model, use_fp32_attention=config.model.get("fp32_attention", False), **model_kwargs
     )
-    for name, param in model.named_parameters():
-        param.requires_grad = ("learnable_token" in name) and local_config.save_learned_tokens
-        
+    # The PixelDiT backbone is frozen.
+    for param in model.parameters():
+        param.requires_grad = False
+
     model = model.to(device)
     logger.info(
         f"{model.__class__.__name__}:{config.model.model}, Model Parameters: {sum(p.numel() for p in model.parameters()):,}"
@@ -187,34 +186,19 @@ class SAN(nn.Module):
         self.default_emb_mask = default_mask                  # (1, 300)
         self.default_tokens_count = default_tokens[0]
 
-        # Per-dataset class embeddings, computed once while the text encoder is loaded.
-        # Training datasets stay on GPU; validation-only ones are kept on CPU to save memory.
+        # Class names per dataset (order = contiguous GT class ids).
         self.default_dataset = train_dataset_names[0]
         self.class_labels = {}   # dataset_name -> List[str]
-        self.class_embs = {}     # dataset_name -> (C, 1, 300, D)
         for name in dict.fromkeys(list(train_dataset_names) + list(test_dataset_names)):
-            labels = get_dataset_labels(name)
-            if labels in self.class_labels.values():
-                # identical vocabulary already embedded (e.g. coco train/test splits)
-                src = next(k for k, v in self.class_labels.items() if v == labels)
-                self.class_labels[name], self.class_embs[name] = labels, self.class_embs[src]
-                continue
-            embs = self.precompute_prompts(labels)
-
-            if name not in train_dataset_names:
-                embs = embs.cpu()
-            self.class_labels[name], self.class_embs[name] = labels, embs
-        # Cache of token-weighted class vectors, valid only while weights are frozen (eval).
-        self._language_target_cache = {}
+            self.class_labels[name] = get_dataset_labels(name)
 
         del self.tokenizer
         del self.text_encoder
 
-        # Store the frozen PixelDiT weights in the autocast dtype. Under fp32 weights, 
+        # Store the frozen PixelDiT weights in the autocast dtype. Under fp32 weights,
         # autocast keeps a half-precision copy of every weight during the forward pass,
-        # so this roughly removes 1.5x the backbone size from GPU memory. Trainable
-        # learnable_token* params stay fp32 for the optimizer. Done after the class
-        # embeddings above so those are still computed in fp32.
+        # so this roughly removes 1.5x the backbone size from GPU memory. Any text
+        # embeddings that need fp32 should be computed above, before this cast.
         self.amp_dtype = amp_dtype
         if amp_dtype is not None:
             for p in self.model.parameters():
@@ -222,28 +206,7 @@ class SAN(nn.Module):
                     p.data = p.data.to(amp_dtype)
             torch.cuda.empty_cache()
 
-        if local_config.use_learned_tokens:
-            self.learnable_token_language_weights = torch.load("learnable_token_language_weights.pt", weights_only=False)
-            self.learnable_token_language_no_object = torch.load("learnable_token_language_no_object.pt", weights_only=False)
-        else:
-            self.learnable_token_language_weights = torch.nn.Embedding(300, 1).to(local_config.device)
-            self.learnable_token_language_no_object = torch.nn.Embedding(1, 1536).to(local_config.device)
-
-        self.learnable_token_logit_scale = nn.Parameter(
-            torch.tensor(math.log(1 / 0.07), device=local_config.device)
-        )
-        self.learnable_token_mask_scale = nn.Parameter(
-            torch.tensor(math.log(5.0), device=local_config.device)
-        )
-        self.learnable_token_mask_bias = nn.Parameter(torch.zeros((), device=local_config.device))
-
-        # Learned weighted sum of the per-layer masks. Weights are softmax(logits) * L,
-        # so they stay positive and sum to L; zero-initialized logits reproduce the
-        # previous plain sum exactly (also when loading checkpoints without this param).
-        self.num_mask_layers = local_config.layer_count
-        self.learnable_token_mask_layer_logits = nn.Parameter(
-            torch.zeros(self.num_mask_layers, device=local_config.device)
-        )
+        # TODO: build the segmentation head here.
 
     @classmethod
     def from_config(cls, cfg):
@@ -297,41 +260,6 @@ class SAN(nn.Module):
             "oracle_min_score": cfg.MODEL.SAN.ORACLE_CLASSES.MIN_SCORE,
         }
     
-    @torch.no_grad()
-    def precompute_prompts_legacy(self, labels: List[str]):
-        prompts = [local_config.default_prompt + " " + local_config.subprompt.format(target=t) for t in labels]
-        embs, _, _ = self.embed_condition(prompts)
-        return embs  # (C, 1, 300, D)
-    
-    @torch.no_grad()
-    def precompute_prompts(self, labels: List[str]):
-        prompts = [local_config.subprompt.format(target=t) for t in labels]
-        embs, emb_masks, tokens_count = self.embed_condition(prompts, with_chi_window=False)
-        assert int(tokens_count.max()) <= embs.shape[2], "class prompt longer than 300 tokens"
-        language_embs_list = []
-        extract_representative_emb = lambda emb, tok_count: emb[:, [int(tok_count) - 1], :]
-        for i in range(embs.shape[0]):
-            current_emb = embs[[i]]
-            current_mask = emb_masks[[i]]
-            tokens_count = tokens_count
-            model_kwargs = dict(data_info={"img_hw": 1024, "aspect_ratio": 1}, mask=current_mask) # TODO: hardcoded resolution
-
-            dpm_solver = DPMS(
-                self.model.forward_with_dpmsolver_prompts,
-                condition=current_emb,
-                uncondition=None,
-                model_type="flow",
-                model_kwargs=model_kwargs,
-                schedule="FLOW",
-                cfg_scale=3.5,
-                precompute_embs=True
-            )
-
-            language_embs_list.append(
-                extract_representative_emb(dpm_solver.segment(torch.zeros(1), {}), tokens_count[i])
-            )
-        return torch.stack(language_embs_list, dim=0)
-
     def embed_condition(self, prompts, with_chi_window=False):
         max_length = 506 if with_chi_window else 300
         caption_token = self.tokenizer(
@@ -369,66 +297,6 @@ class SAN(nn.Module):
             segment_data
         )
 
-    @staticmethod
-    def language_targets(language_tokens, language_weights, chunk_size=64):
-        """(C, 1, 300, D) class token embeddings -> (C, 1, D) using learned token weights.
-        Chunked so large vocabularies stored on CPU never sit on the GPU all at once."""
-        device = language_weights.device
-        return language_tokens.to(device)
-
-    def get_language_targets(self, dataset_name):
-        weights = self.learnable_token_language_weights.weight
-        if self.training:
-            self._language_target_cache.clear()
-            return SAN.language_targets(self.class_embs[dataset_name], weights)
-        if dataset_name not in self._language_target_cache:
-            with torch.no_grad():
-                self._language_target_cache[dataset_name] = SAN.language_targets(
-                    self.class_embs[dataset_name], weights
-                )
-        return self._language_target_cache[dataset_name]
-
-    def train(self, mode: bool = True):
-        self._language_target_cache = {}
-        return super().train(mode)
-
-    @staticmethod
-    def clasify_masks(visual_tokens, language_targets, language_no_object, logit_scale=None):
-        # visual_tokens -> (B, layers, Q, D), language_targets -> (C, 1, D)
-        B = visual_tokens.shape[0]
-        visual_tokens = visual_tokens.sum(dim=1) # sum across layers TODO: try other ways of aggregating visual features for comparison with language
-        language_targets = torch.cat([language_targets[:,0], language_no_object[None,:,:]], dim=0).permute(1,2,0).expand(B, -1, -1)
-        visual_tokens = visual_tokens.permute(0,2,1)
-        my_norm = lambda x,d: torch.nn.functional.normalize(x, dim=d)
-        classes = my_norm(visual_tokens, 1).permute(0,2,1) @ my_norm(language_targets, 1)
-        if logit_scale is not None:
-            # clamp as in CLIP so the temperature can't blow up
-            classes = classes * logit_scale.exp().clamp(max=100.0)
-        return classes
-    
-    def mask_layer_weights(self):
-        """(L,) positive per-layer weights summing to L."""
-        logits = self.learnable_token_mask_layer_logits.float()
-        return logits.softmax(dim=0) * logits.numel()
-
-    @staticmethod
-    def masks_from_tokens_and_dense_features(visual_features, aggregate_layers=True, layer_weights=None):
-        learned_vision = visual_features[:,:,:local_config.no_vision_learnable_tokens,:]
-        dense_vision = visual_features[:,:,local_config.no_vision_learnable_tokens:,:]
-        my_norm = lambda x: x if not local_config.norm_before_dot else torch.nn.functional.normalize(x, dim=-1)
-        mask_pred = my_norm(dense_vision) @ my_norm(learned_vision).permute(0, 1, 3, 2)
-
-        # masks (b, l, p, t)
-        if not aggregate_layers:
-            return mask_pred
-        if layer_weights is None:
-            return mask_pred.sum(dim=1)
-        assert layer_weights.numel() == mask_pred.shape[1], (
-            f"{layer_weights.numel()} layer weights for {mask_pred.shape[1]} layers"
-        )
-        # weighted sum over layers: (b, l, p, t) x (l,) -> (b, p, t)
-        return torch.einsum("blpt,l->bpt", mask_pred, layer_weights.to(mask_pred.dtype))
-
     def call_model(self, image_tensor, dataset_name):
         # Autocast here too (not only in the training loop) because evaluation runs
         # without it, and the frozen weights may be in half precision. Inside the
@@ -440,36 +308,21 @@ class SAN(nn.Module):
         return mask_logits.float(), mask_pred.float()
 
     def _call_model(self, image_tensor, dataset_name):
+        """Run the frozen backbone and the segmentation head.
+
+        Must return:
+          mask_logits: (B, Q, C + 1) class logits per mask, last column = no object
+          mask_pred:   (B, Q, h, w) mask logits on the patch grid
+        """
         segment_data = {}
         # Grad mode is left to the caller: on during training, off (torch.no_grad)
         # during detectron2 evaluation, so no autograd graph is built at test time.
         self.run_diffusion_model(image_tensor, segment_data)
 
         h, w = segment_data["hw"]
-        visual_features = segment_data["all_vision_features"]
-        mask_pred = SAN.masks_from_tokens_and_dense_features(
-            visual_features, layer_weights=self.mask_layer_weights()
-        )
-        mask_pred = (
-            mask_pred * self.learnable_token_mask_scale.exp().clamp(max=100.0)
-            + self.learnable_token_mask_bias
-        )
+        patch_features = segment_data["patch_features"]  # (B, layers, h*w, hidden)
 
-        vl_features = segment_data["vl_learned"]
-        attn_bias = SAN.masks_from_tokens_and_dense_features(vl_features, aggregate_layers=False)
-        
-        language_features = segment_data["language_targets"]
-        my_norm = lambda x: x if not local_config.norm_before_dot else torch.nn.functional.normalize(x, dim=-1)
-        masked_vl_featues = my_norm(attn_bias.permute(0,1,3,2)) @ my_norm(einops.rearrange(language_features, "b l p h d -> b l p (h d)"))
-
-        mask_logits = SAN.clasify_masks(
-            masked_vl_featues,
-            self.get_language_targets(dataset_name),
-            self.learnable_token_language_no_object.weight,
-            logit_scale=self.learnable_token_logit_scale,
-        )
-        B, P, L = mask_pred.shape
-        return mask_logits, mask_pred.permute(0, 2, 1).view(B, L, h, w)
+        raise NotImplementedError("Segmentation head not implemented yet.")
 
     def forward(self, batched_inputs):
         images = [x["image"].to(local_config.device).float() / 255.0 for x in batched_inputs]
@@ -561,10 +414,10 @@ class SAN(nn.Module):
         names = {x.get("meta", {}).get("dataset_name", self.default_dataset) for x in batched_inputs}
         assert len(names) == 1, f"All images in a batch must be from the same dataset, got {names}"
         name = names.pop()
-        if name not in self.class_embs:
+        if name not in self.class_labels:
             raise KeyError(
-                f"No text embeddings for '{name}'. Add it to DATASETS.TEST (or TRAIN) so its "
-                "class names are embedded at model construction."
+                f"No class names for '{name}'. Add it to DATASETS.TEST (or TRAIN) so its "
+                "vocabulary is loaded at model construction."
             )
         return name
 
