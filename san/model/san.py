@@ -1,3 +1,7 @@
+import contextlib
+import logging
+import zlib
+from collections import defaultdict
 from typing import List
 
 import open_clip
@@ -18,6 +22,7 @@ import json
 
 from .criterion import SetCriterion
 from .matcher import HungarianMatcher
+from .pixeldit_classifier import PixelDiTRegionClassifier
 from .side_adapter import build_side_adapter_network
 from ..utils.amp import resolve_amp_dtype
 
@@ -28,6 +33,7 @@ from t2i.diffusion.utils.config import PixDiTConfig, model_init_config
 from t2i.diffusion.utils.logger import get_root_logger
 
 from t2i.diffusion.model.flow_dpm import DPMS
+from t2i.diffusion.model.dpm_solver import NoiseScheduleFlow
 from t2i.diffusion.model.trainer import PixDiTTrainer
 
 import t2i.config as local_config
@@ -152,6 +158,26 @@ def get_model():
     return model.eval().to(torch.float32), tokenizer, text_encoder.eval()
 
 
+def model_timestep(device, t: Optional[float] = None) -> torch.Tensor:
+    """The model-time value PixelDiT receives in run_diffusion_model for continuous
+    flow time t (default local_config.timestep): DPM_Solver_Wrapper builds t in bf16,
+    and get_model_input_time scales it by total_N for the discrete flow schedule."""
+    t = local_config.timestep if t is None else t
+    t = torch.tensor(t, device=device, dtype=torch.bfloat16)
+    return t * NoiseScheduleFlow(schedule="discrete_flow").total_N
+
+
+@contextlib.contextmanager
+def override_timestep(t: float):
+    """Temporarily change the timestep DPM_Solver_Wrapper.segment passes to PixelDiT."""
+    old = local_config.timestep
+    local_config.timestep = t
+    try:
+        yield
+    finally:
+        local_config.timestep = old
+
+
 @META_ARCH_REGISTRY.register()
 class SAN(nn.Module):
     @configurable
@@ -171,6 +197,7 @@ class SAN(nn.Module):
         oracle_mask_threshold: float = 0.5,
         oracle_min_score: float = 0.0,
         oracle_weight_by_objectness: bool = True,
+        pixeldit_classifier: Optional[dict] = None,
     ):
         super().__init__()
         self.size_divisibility = 16
@@ -184,11 +211,54 @@ class SAN(nn.Module):
         self.oracle_min_score = oracle_min_score
         self.oracle_weight_by_objectness = oracle_weight_by_objectness
 
+        # Zero-shot PixelDiT classifier (inference only for now).
+        self.classifier = None
+        if pixeldit_classifier is not None:
+            pixeldit_classifier = dict(pixeldit_classifier)
+            self.classifier_mask_source = pixeldit_classifier.pop("mask_source")
+            self.classifier_temperature = float(pixeldit_classifier.pop("temperature"))
+            self.classifier_noise_seed = int(pixeldit_classifier.pop("noise_seed"))
+            self.classifier_calibrations = list(pixeldit_classifier.pop("calibration"))
+            bad = [c for c in self.classifier_calibrations if c not in ("none", "image", "dataset")]
+            if not self.classifier_calibrations or bad or len(set(self.classifier_calibrations)) != len(self.classifier_calibrations):
+                raise ValueError(
+                    "MODEL.PIXELDIT.CLASSIFIER.CALIBRATION must be a non-empty list of distinct "
+                    f"'none' / 'image' / 'dataset', got {self.classifier_calibrations}"
+                )
+            # Running per-class sums of token scores for "dataset": (dataset, t) -> [sum, count]
+            self._calib_stats = {}
+            timesteps = [float(t) for t in pixeldit_classifier.pop("timesteps")]
+            if any(not 0.0 < t <= 1.0 for t in timesteps):
+                raise ValueError(f"MODEL.PIXELDIT.CLASSIFIER.TIMESTEPS must lie in (0, 1], got {timesteps}")
+            # None = reuse the stage-1 pass (clean image at local_config.timestep).
+            self.classifier_timesteps = timesteps or [None]
+            if pixeldit_classifier.pop("use_chi_prefix"):
+                marker = "User Prompt: "
+                if marker not in local_config.default_prompt:
+                    raise ValueError("USE_CHI_PREFIX: no 'User Prompt: ' in t2i default_prompt")
+                pixeldit_classifier["prompt_prefix"] = (
+                    local_config.default_prompt.rsplit(marker, 1)[0] + marker
+                )
+            if self.classifier_mask_source not in ("gt", "pred"):
+                raise ValueError(
+                    f"MODEL.PIXELDIT.CLASSIFIER.MASK_SOURCE must be 'gt' or 'pred', got {self.classifier_mask_source!r}"
+                )
+            self.classifier = PixelDiTRegionClassifier(**pixeldit_classifier)
+            if oracle_classes:
+                raise ValueError(
+                    "MODEL.PIXELDIT.CLASSIFIER.ENABLED and MODEL.SAN.ORACLE_CLASSES.ENABLED "
+                    "both assign the mask classes; enable only one."
+                )
+        self._diag_stats = defaultdict(lambda: defaultdict(int))
+        self._diag_images = defaultdict(int)
+        self._concept_debug_logged = set()
+
         self.class_agnostic = class_agnostic
-        if class_agnostic and not oracle_classes:
+        if class_agnostic and not (oracle_classes or self.classifier is not None):
             raise ValueError(
                 "MODEL.SAN.CLASS_AGNOSTIC predicts no classes, so it needs "
-                "MODEL.SAN.ORACLE_CLASSES.ENABLED to label the masks at inference."
+                "MODEL.SAN.ORACLE_CLASSES.ENABLED or MODEL.PIXELDIT.CLASSIFIER.ENABLED "
+                "to label the masks at inference."
             )
 
         # PixelDiT layers fed to the side adapter (0 = patch embedding, k = block k).
@@ -196,14 +266,22 @@ class SAN(nn.Module):
         self.feature_layers = sorted(set(int(k) for k in feature_layers))
         if not self.feature_layers or self.feature_layers[0] < 0:
             raise ValueError(f"MODEL.PIXELDIT.FEATURE_LAYERS must be non-negative, got {feature_layers}")
-        local_config.layer_count = self.feature_layers[-1]
+        # Layers the stage-1 PixelDiT run must return; blocks needed by the
+        # classifier (masked blocks + readout) are built but run separately.
+        self._tap_layers = set(self.feature_layers)
+        deepest_block = self.feature_layers[-1]
+        if self.classifier is not None:
+            self._tap_layers.add(self.classifier.input_layer)
+            deepest_block = max(deepest_block, self.classifier.deepest_block)
+        self._tap_layers = sorted(self._tap_layers)
+        local_config.layer_count = deepest_block
 
         self.model, self.tokenizer, self.text_encoder = get_model()
         num_blocks = len(self.model.core.patch_blocks)
-        if self.feature_layers[-1] > num_blocks:
+        if deepest_block > num_blocks:
             raise ValueError(
-                f"MODEL.PIXELDIT.FEATURE_LAYERS {self.feature_layers} goes deeper than the "
-                f"{num_blocks} PixelDiT patch blocks."
+                f"Need PixelDiT block {deepest_block} (FEATURE_LAYERS {self.feature_layers}, "
+                f"classifier readout block), but the model has only {num_blocks} patch blocks."
             )
 
         # The diffusion model is always conditioned on the dataset-agnostic default prompt.
@@ -217,6 +295,13 @@ class SAN(nn.Module):
         self.class_labels = {}   # dataset_name -> List[str]
         for name in dict.fromkeys(list(train_dataset_names) + list(test_dataset_names)):
             self.class_labels[name] = get_dataset_labels(name)
+
+        # Class keys for the PixelDiT classifier, per dataset vocabulary. Built now,
+        # while the text encoder is loaded and PixelDiT is still in fp32.
+        self._vocab_keys = {}
+        self._vocab_concepts = {}
+        if self.classifier is not None:
+            self._build_vocabulary_keys()
 
         del self.tokenizer
         del self.text_encoder
@@ -294,6 +379,33 @@ class SAN(nn.Module):
             "oracle_mask_threshold": cfg.MODEL.SAN.ORACLE_CLASSES.MASK_THRESHOLD,
             "oracle_min_score": cfg.MODEL.SAN.ORACLE_CLASSES.MIN_SCORE,
             "oracle_weight_by_objectness": cfg.MODEL.SAN.ORACLE_CLASSES.WEIGHT_BY_OBJECTNESS,
+            "pixeldit_classifier": cls._classifier_args(cfg.MODEL.PIXELDIT.CLASSIFIER),
+        }
+
+    @staticmethod
+    def _classifier_args(c):
+        if not c.ENABLED:
+            return None
+        return {
+            "mask_source": c.MASK_SOURCE,
+            "temperature": c.TEMPERATURE,
+            "readout_block": c.READOUT_BLOCK,
+            "num_masked_blocks": c.NUM_MASKED_BLOCKS,
+            "mask_attention": c.MASK_ATTENTION,
+            "soft_eps": c.SOFT_EPS,
+            "token_pool": c.TOKEN_POOL,
+            "text_tokens": c.TEXT_TOKENS,
+            "prompt_template": c.PROMPT_TEMPLATE,
+            "readout": c.READOUT,
+            "concept_num_blocks": c.CONCEPT.NUM_BLOCKS,
+            "concept_readout_blocks": list(c.CONCEPT.READOUT_BLOCKS),
+            "concept_masked_blocks": list(c.CONCEPT.MASKED_BLOCKS),
+            "concept_token_softmax": c.CONCEPT.TOKEN_SOFTMAX,
+            "fp32_residual": c.CONCEPT.FP32_RESIDUAL,
+            "timesteps": list(c.TIMESTEPS),
+            "noise_seed": c.NOISE_SEED,
+            "calibration": list(c.CALIBRATION),
+            "use_chi_prefix": c.USE_CHI_PREFIX,
         }
     
     def embed_condition(self, prompts, with_chi_window=False):
@@ -310,6 +422,117 @@ class SAN(nn.Module):
         emb_masks = caption_token.attention_mask[:, select_index]
         return caption_embs, emb_masks, tokens_count
     
+    @torch.no_grad()
+    def _build_vocabulary_keys(self, chunk_size: int = 16):
+        """Readout-block keys of every class prompt, for each dataset vocabulary."""
+        core = self.model.core
+        device = next(core.parameters()).device
+        # The text stream's adaLN depends on t, so the keys are built per timestep.
+        conditions = {
+            t: core.timestep_condition(model_timestep(device, t).float())
+            for t in self.classifier_timesteps
+        }
+        self._vocab_conditions = conditions
+        self._checked_conditions = set()
+        log = logging.getLogger("san")
+        if self.classifier.readout == "concept":
+            # Concept tokens do not depend on t (their stream is run per image).
+            for name, labels in self.class_labels.items():
+                prompts = self.classifier.prompts(labels)
+                embs, attn_mask, _ = self.embed_condition(prompts)
+                if (attn_mask.sum(1) >= attn_mask.shape[1]).any():
+                    log.warning("PixelDiT classifier: some class prompts hit the 300-token limit")
+                select = self.classifier.class_token_mask(self.tokenizer, prompts, attn_mask)
+                self._vocab_concepts[name] = self.classifier.build_concepts(core, embs[:, 0], select)
+                log.info(
+                    "PixelDiT classifier (concept readout): %d classes for %s, %d concept tokens, e.g. %r",
+                    len(prompts), name, self._vocab_concepts[name][0].shape[0], prompts[0][-80:],
+                )
+            return
+        for name, labels in self.class_labels.items():
+            prompts = self.classifier.prompts(labels)
+            keys = {t: [] for t in conditions}
+            valid = {t: [] for t in conditions}
+            for i in range(0, len(prompts), chunk_size):
+                chunk = prompts[i : i + chunk_size]
+                embs, attn_mask, _ = self.embed_condition(chunk)  # (n, 1, 300, D), (n, 300)
+                if (attn_mask.sum(1) >= attn_mask.shape[1]).any():
+                    log.warning("PixelDiT classifier: some class prompts hit the 300-token limit")
+                select = self.classifier.class_token_mask(self.tokenizer, chunk, attn_mask)
+                for t, condition in conditions.items():
+                    k, v = self.classifier.build_text_keys(core, embs[:, 0], attn_mask, select, condition)
+                    keys[t].append(k)
+                    valid[t].append(v)
+            for t in conditions:
+                T = max(k.shape[1] for k in keys[t])
+                k = torch.cat([F.pad(k, (0, 0, 0, 0, 0, T - k.shape[1])) for k in keys[t]])
+                v = torch.cat(
+                    [torch.cat([v, v.new_zeros(v.shape[0], T - v.shape[1])], dim=1) for v in valid[t]]
+                )
+                self._vocab_keys[(name, t)] = (k, v)
+            log.info(
+                "PixelDiT classifier: %d class prompts for %s (up to %d key tokens each), "
+                "timesteps %s, e.g. %r",
+                len(prompts), name, T, [self._t_label(t) for t in conditions], prompts[0][-80:],
+            )
+
+    @staticmethod
+    def _t_label(t):
+        return f"t={local_config.timestep:g} (stage 1, clean)" if t is None else f"t={t:g}"
+
+    @torch.no_grad()
+    def _classifier_passes(self, batched_inputs, images_tensor, segment_data):
+        """PixelDiT tokens at the classifier's input layer and their adaLN condition,
+        for every classifier timestep: [(t, tokens (B, L, hidden), condition,
+        prompt tokens (B, Ltxt, hidden) at the same layer)]. t=None
+        reuses the stage-1 pass; otherwise the image is noised to x_t = (1-t) x + t eps
+        with per-image deterministic eps (the same for every t)."""
+        layer = self.classifier.input_layer
+        passes = []
+        eps = None
+        for t in self.classifier_timesteps:
+            if t is None:
+                passes.append((
+                    t, segment_data["features"][layer], segment_data["condition"],
+                    segment_data["text_features"][layer],
+                ))
+                continue
+            if eps is None:
+                eps = torch.empty_like(images_tensor, dtype=torch.float32)
+                for b, inp in enumerate(batched_inputs):
+                    key = str(inp.get("file_name", inp.get("image_id", b)))
+                    g = torch.Generator(device=images_tensor.device)
+                    g.manual_seed(self.classifier_noise_seed + zlib.crc32(key.encode()))
+                    eps[b] = torch.randn(
+                        eps.shape[1:], generator=g, device=images_tensor.device, dtype=torch.float32
+                    )
+            x_t = (1.0 - t) * images_tensor.float() + t * eps
+            sd = {"feature_layers": [layer]}
+            with override_timestep(t), torch.autocast(
+                "cuda", dtype=self.amp_dtype or torch.float32, enabled=self.amp_dtype is not None
+            ):
+                self.run_diffusion_model(x_t, sd)
+            assert sd["hw"] == segment_data["hw"], (sd["hw"], segment_data["hw"])
+            passes.append((t, sd["features"][layer], sd["condition"], sd["text_features"][layer]))
+        # Once per timestep: the image pass must have used the same adaLN condition as
+        # the class keys, otherwise image and text streams are at different t.
+        for t, _, condition, _ in passes:
+            if t in self._checked_conditions:
+                continue
+            ref = self._vocab_conditions[t].to(condition.device, torch.float32)
+            err = (condition.float()[:1] - ref).abs().max().item()
+            scale = ref.abs().max().item()
+            rel = err / max(scale, 1e-6)
+            msg = (
+                f"PixelDiT classifier {self._t_label(t)}: image-pass timestep condition vs class-key "
+                f"condition: max abs diff {err:.3g} (relative {rel:.3g})"
+            )
+            if rel > 0.2:  # far beyond bf16 rounding: the two streams are at different t
+                raise RuntimeError(msg)
+            logging.getLogger("san").log(logging.WARNING if rel > 2e-2 else logging.INFO, msg)
+            self._checked_conditions.add(t)
+        return passes
+
     def run_diffusion_model(self, image, segment_data):
         """One forward pass of the frozen PixelDiT on the clean image at the fixed
         timestep local_config.timestep, conditioned on the default prompt. Fills
@@ -342,8 +565,8 @@ class SAN(nn.Module):
         with torch.autocast(
             "cuda", dtype=self.amp_dtype or torch.float32, enabled=self.amp_dtype is not None
         ):
-            mask_logits, mask_preds = self._call_model(image_tensor, dataset_name)
-        return [x.float() for x in mask_logits], [x.float() for x in mask_preds]
+            mask_logits, mask_preds, segment_data = self._call_model(image_tensor, dataset_name)
+        return [x.float() for x in mask_logits], [x.float() for x in mask_preds], segment_data
 
     def _call_model(self, image_tensor, dataset_name):
         """Run the frozen backbone and the side adapter.
@@ -354,8 +577,11 @@ class SAN(nn.Module):
           mask_logits: (B, Q, K + 1) class logits per mask, last column = no object
                        (K = 1 when MODEL.SAN.CLASS_AGNOSTIC)
           mask_preds:  (B, Q, h, w) mask logits on the patch grid
+        and the PixelDiT segment_data (features of all tapped layers, condition, pos).
+        Both lists are empty when the side adapter is not needed (GT-mask classifier
+        diagnostic).
         """
-        segment_data = {"feature_layers": self.feature_layers}
+        segment_data = {"feature_layers": self._tap_layers}
         # The backbone is frozen and nothing before it is trained, so no autograd
         # graph is needed through it, even during training.
         with torch.no_grad():
@@ -364,12 +590,14 @@ class SAN(nn.Module):
         h, w = segment_data["hw"]
         # {layer: (B, h*w, hidden)} -> {layer: (B, hidden, h, w)}. fp32 so the
         # fusion LayerNorm statistics are not computed in half precision.
+        if self.classifier is not None and self.classifier_mask_source == "gt" and not self.training:
+            return [], [], segment_data
         backbone_features = {
-            k: v.detach().float().transpose(1, 2).reshape(v.shape[0], v.shape[-1], h, w)
-            for k, v in segment_data["features"].items()
+            k: segment_data["features"][k].detach().float().transpose(1, 2).reshape(-1, segment_data["features"][k].shape[-1], h, w)
+            for k in self.feature_layers
         }
         mask_preds, mask_logits = self.side_adapter_network(image_tensor, backbone_features)
-        return mask_logits, mask_preds
+        return mask_logits, mask_preds, segment_data
 
     def forward(self, batched_inputs):
         images = [x["image"].to(local_config.device).float() / 255.0 for x in batched_inputs]
@@ -382,7 +610,12 @@ class SAN(nn.Module):
         images_tensor = images.tensor
 
         dataset_name = self._dataset_name(batched_inputs)
-        mask_logits, mask_preds = self.call_model(images_tensor, dataset_name)
+        if self.training and self.classifier is not None:
+            raise NotImplementedError(
+                "MODEL.PIXELDIT.CLASSIFIER is inference-only for now (zero-shot diagnostic); "
+                "disable it for training."
+            )
+        mask_logits, mask_preds, segment_data = self.call_model(images_tensor, dataset_name)
         if self.training:
             if "instances" in batched_inputs[0]:
                 gt_instances = [x["instances"].to(local_config.device) for x in batched_inputs]
@@ -412,6 +645,11 @@ class SAN(nn.Module):
                     # remove this loss if not specified in `weight_dict`
                     losses.pop(k)
             return losses
+        elif self.classifier is not None:
+            passes = self._classifier_passes(batched_inputs, images.tensor, segment_data)
+            return self._classifier_inference(
+                batched_inputs, images, mask_logits, mask_preds, segment_data, dataset_name, passes
+            )
         else:
             mask_preds = mask_preds[-1]
             mask_logits = mask_logits[-1]
@@ -460,6 +698,176 @@ class SAN(nn.Module):
                     )
                 processed_results[-1]["sem_seg"] = r
             return processed_results
+
+    # -------------------------------------------------------- PixelDiT classifier
+    def _classifier_inference(
+        self, batched_inputs, images, mask_logits, mask_preds, segment_data, dataset_name, passes
+    ):
+        """Semantic segmentation with masks classified by PixelDiTRegionClassifier.
+
+        MASK_SOURCE "gt": the regions are the GT segments (one per class present), so
+        the result measures classification alone. "pred": side adapter masks and
+        objectness, as in normal inference but with PixelDiT class scores.
+        `passes` (from _classifier_passes) holds one PixelDiT pass per classifier
+        timestep; class probabilities are averaged over them.
+        """
+        core = self.model.core
+        num_classes = len(self.class_labels[dataset_name])
+        ignore_label = self._ignore_label(dataset_name)
+        h, w = segment_data["hw"]
+        pad_h, pad_w = images.tensor.shape[-2:]
+        stride = pad_h // h
+        assert pad_h == h * stride and pad_w == w * stride, (images.tensor.shape, h, w)
+        pos = segment_data["pos"]
+
+        def classify(b, region_weights, pool_weights, token_valid):
+            """Scores (K, C) for every (timestep, readout block, calibration) as
+            (t, block, calib, scores), block = None for the q·k readout; and for each
+            calibration the class probabilities averaged over timesteps (concept
+            readout: of the block average, or the single readout block)."""
+            all_scores, probs = [], {c: 0.0 for c in self.classifier_calibrations}
+            n_valid = int(token_valid.sum())
+            for t, tokens, condition, text_tokens in passes:
+                cond = condition[b : b + 1] if condition.shape[0] > 1 else condition
+                if self.classifier.readout == "concept":
+                    debug = t not in self._concept_debug_logged
+                    results = self.classifier.concept_scores(
+                        core, tokens[b : b + 1], text_tokens[b : b + 1], cond, pos,
+                        self._vocab_concepts[dataset_name], region_weights, pool_weights, token_valid,
+                        debug=debug,
+                    )
+                    if debug:
+                        self._concept_debug_logged.add(t)
+                        rows = [
+                            f"  block {blk:>2} ({dt}): " + "  ".join(
+                                f"{n} {m:9.3g}{'' if ok else ' NON-FINITE'}"
+                                for n, (m, ok) in zip(("|x|", "|y|", "|cpt|", "|o_x|", "|o_c|"), st)
+                            )
+                            for blk, dt, *st in self.classifier.last_debug
+                        ]
+                        logging.getLogger("san").info(
+                            "PixelDiT concept readout, max activations on the first image (%s; "
+                            "float16 overflows above 65504):\n%s",
+                            self._t_label(t), "\n".join(rows),
+                        )
+                    final = "avg" if len(results) > 1 else results[0][0]
+                else:
+                    keys, valid = self._vocab_keys[(dataset_name, t)]
+                    scores, image_mean = self.classifier(
+                        core, tokens[b : b + 1], cond, pos, region_weights, pool_weights, keys, valid,
+                        token_valid=token_valid,
+                    )
+                    results, final = [(None, scores, image_mean)], None
+                for block, scores, image_mean in results:
+                    scores, image_mean = scores.float(), image_mean.float()
+                    if "dataset" in probs:
+                        acc = self._calib_stats.setdefault((dataset_name, t, block), [0.0, 0])
+                        acc[0] = acc[0] + image_mean * n_valid
+                        acc[1] += n_valid
+                    for calib in self.classifier_calibrations:
+                        if calib == "image":
+                            s = scores - image_mean
+                        elif calib == "dataset":
+                            acc = self._calib_stats[(dataset_name, t, block)]
+                            s = scores - acc[0] / acc[1]
+                        else:
+                            s = scores
+                        all_scores.append((t, block, calib, s))
+                        if block == final:
+                            probs[calib] = probs[calib] + F.softmax(s / self.classifier_temperature, dim=-1)
+            return all_scores, {c: p / len(passes) for c, p in probs.items()}
+
+        processed_results = []
+        for b, (input_per_image, image_size) in enumerate(zip(batched_inputs, images.image_sizes)):
+            height = input_per_image.get("height", image_size[0])
+            width = input_per_image.get("width", image_size[1])
+            ih, iw = image_size
+            # Tokens whose patch overlaps the image (the rest is ImageList padding).
+            token_valid = torch.zeros(h, w, dtype=torch.bool, device=images.tensor.device)
+            token_valid[: -(-ih // stride), : -(-iw // stride)] = True
+            token_valid = token_valid.flatten()
+            with torch.autocast(
+                "cuda", dtype=self.amp_dtype or torch.float32, enabled=self.amp_dtype is not None
+            ):
+                if self.classifier_mask_source == "gt":
+                    gt = self._gt_sem_seg(input_per_image, image_size)
+                    labeled = (gt != ignore_label) & (gt >= 0) & (gt < num_classes)
+                    seg_classes = torch.unique(gt[labeled])
+                    if seg_classes.numel() == 0:
+                        r = torch.zeros(num_classes, ih, iw, device=gt.device)
+                    else:
+                        masks = torch.zeros(len(seg_classes), pad_h, pad_w, device=gt.device)
+                        masks[:, :ih, :iw] = (gt[None] == seg_classes[:, None, None]).float()
+                        # Fraction of each token's patch covered by each segment.
+                        weights = F.avg_pool2d(masks[None], kernel_size=stride)[0].flatten(1)  # (K, L)
+                        all_scores, probs = classify(b, weights.T, weights, token_valid)
+                        r = torch.einsum(
+                            "kc,khw->chw", probs[self.classifier_calibrations[0]], masks[:, :ih, :iw]
+                        )
+                        for t, block, calib, scores in all_scores:
+                            label = f"{self._t_label(t)} | {calib}"
+                            if block is not None:
+                                label += f" | block {block}"
+                            self._update_diag_stats(dataset_name, label, scores, seg_classes)
+                        if len(passes) > 1:
+                            for calib, p in probs.items():
+                                self._update_diag_stats(
+                                    dataset_name, f"mean of timesteps | {calib}", p, seg_classes
+                                )
+                        self._maybe_log_diag_stats(dataset_name)
+                else:
+                    m = mask_preds[-1][b]  # (Q, h, w) logits on the token grid
+                    objectness = F.softmax(mask_logits[-1][b].float(), dim=-1)[:, :-1].sum(-1)  # (Q,)
+                    member = m.float().sigmoid().flatten(1)  # (Q, L)
+                    _, probs = classify(b, (objectness[:, None] * member).T, member, token_valid)
+                    mask_cls = objectness[:, None] * probs[self.classifier_calibrations[0]]
+                    masks_up = F.interpolate(
+                        m[None].float(), size=(pad_h, pad_w), mode="bilinear", align_corners=False
+                    )[0][:, :ih, :iw]
+                    r = self.semantic_inference(mask_cls, masks_up, cls_are_probs=True)
+            r = retry_if_cuda_oom(sem_seg_postprocess)(r.float(), image_size, height, width)
+            processed_results.append({"sem_seg": r})
+        return processed_results
+
+    def _update_diag_stats(self, dataset_name, label, scores, seg_classes):
+        """Segment-level top-1 / top-5 accuracy on GT segments (each segment counts
+        once, regardless of its area), and how often each class is predicted."""
+        st = self._diag_stats[(dataset_name, label)]
+        finite = torch.isfinite(scores).all(-1)
+        st["nonfinite"] += int((~finite).sum())
+        # Non-finite rows never count as correct (topk would pick an arbitrary class).
+        scores = torch.where(finite[:, None], scores, torch.full_like(scores, float("-inf")))
+        topk = scores.topk(min(5, scores.shape[-1]), dim=-1).indices
+        topk = torch.where(finite[:, None], topk, torch.full_like(topk, -1))
+        st["segments"] += len(seg_classes)
+        st["top1"] += int((topk[:, 0] == seg_classes).sum())
+        st["top5"] += int((topk == seg_classes[:, None]).any(1).sum())
+        for c in topk[:, 0].tolist():
+            if c >= 0:
+                st[("pred", c)] += 1
+
+    def _maybe_log_diag_stats(self, dataset_name, log_every=50):
+        self._diag_images[dataset_name] += 1
+        n = self._diag_images[dataset_name]
+        if n % log_every:
+            return
+        names = self.class_labels[dataset_name]
+        lines = [f"PixelDiT classifier on {dataset_name} GT segments after {n} images:"]
+        for (ds, label), st in self._diag_stats.items():
+            if ds != dataset_name or not st["segments"]:
+                continue
+            seg = st["segments"]
+            preds = sorted(
+                ((v, k[1]) for k, v in st.items() if isinstance(k, tuple)), reverse=True
+            )[:3]
+            most = ", ".join(f"{names[c]} {100.0 * v / seg:.0f}%" for v, c in preds)
+            if st["nonfinite"]:
+                most += f"; NON-FINITE scores in {st['nonfinite']} segments"
+            lines.append(
+                f"  {label:>48}: top-1 {100.0 * st['top1'] / seg:5.2f}%  "
+                f"top-5 {100.0 * st['top5'] / seg:5.2f}%  ({seg} segments; most predicted: {most})"
+            )
+        logging.getLogger("san").info("\n".join(lines))
 
     def _dataset_name(self, batched_inputs):
         names = {x.get("meta", {}).get("dataset_name", self.default_dataset) for x in batched_inputs}

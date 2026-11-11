@@ -129,7 +129,125 @@ def check_side_adapter():
     print("eval: ok")
 
 
+def check_classifier():
+    from san.model.pixeldit_classifier import PixelDiTRegionClassifier
+
+    local_config.layer_count = 5
+    core = PixDiT_T2I(
+        hidden_size=96, num_groups=4, patch_depth=14, txt_embed_dim=32, txt_max_length=12
+    ).to(device).eval()
+    H_img, W_img = 128, 96
+    x = torch.randn(1, 3, H_img, W_img, device=device)
+    y = torch.randn(1, 12, 32, device=device)
+    t = torch.tensor(2.0, device=device)
+
+    with torch.no_grad():
+        seg = {"feature_layers": [1, 2, 3]}
+        core(x, t, y, segment_data=seg)
+        L = seg["hw"][0] * seg["hw"][1]
+        assert seg["condition"].shape == (1, 1, 96)
+        cond_init = core.timestep_condition(t)
+        assert torch.allclose(cond_init, seg["condition"], atol=1e-5)
+
+        # Text-only keys for 3 "classes" with 2-4 real tokens each, right-padded.
+        C, Ltxt = 3, 12
+        caps = torch.randn(C, Ltxt, 32, device=device)
+        attn = torch.zeros(C, Ltxt, dtype=torch.long, device=device)
+        for i, n in enumerate([3, 5, 4]):
+            attn[i, :n] = 1
+        select = attn.bool().clone()
+        select[:, 0] = False  # drop BOS
+        for mode in ["soft", "hard", "none"]:
+            clf = PixelDiTRegionClassifier(readout_block=5, num_masked_blocks=1, mask_attention=mode)
+            assert clf.input_layer == 3 and clf.masked_blocks == [4]
+            keys, valid = clf.build_text_keys(core, caps, attn, select, cond_init)
+            assert keys.shape == (C, 4, 4, 24) and valid.sum(1).tolist() == [2, 4, 3]
+
+            # Padding must not change a class's keys.
+            caps2 = caps.clone()
+            caps2[0, 3:] = torch.randn_like(caps2[0, 3:])
+            keys2, _ = clf.build_text_keys(core, caps2, attn, select, cond_init)
+            assert torch.allclose(keys[0][valid[0]], keys2[0][valid[0]], atol=1e-4), "padding leaked"
+
+            regions = torch.zeros(L, 2, device=device)
+            regions[: L // 2, 0] = 1.0
+            regions[L // 2 : L - 4, 1] = 1.0  # last 4 tokens have no region
+            scores, image_mean = clf(core, seg["features"][3], seg["condition"], seg["pos"],
+                         regions, regions.T, keys, valid)
+            assert scores.shape == (2, C) and torch.isfinite(scores).all(), mode
+            assert image_mean.shape == (C,), image_mean.shape
+
+        # Region restriction: with hard masks, changing one region's tokens must not
+        # affect the other region's scores.
+        clf = PixelDiTRegionClassifier(readout_block=5, num_masked_blocks=1, mask_attention="hard")
+        tokens = seg["features"][3].clone()
+        s1, _ = clf(core, tokens, seg["condition"], seg["pos"], regions, regions.T, keys, valid)
+        tokens[:, L // 2 : L - 4] += torch.randn_like(tokens[:, L // 2 : L - 4])
+        s2, _ = clf(core, tokens, seg["condition"], seg["pos"], regions, regions.T, keys, valid)
+        assert torch.allclose(s1[0], s2[0], atol=1e-4) and not torch.allclose(s1[1], s2[1]), "regions not isolated"
+    print("classifier: ok")
+
+
+def check_concept_readout():
+    from san.model.pixeldit_classifier import PixelDiTRegionClassifier
+
+    local_config.layer_count = 3
+    core = PixDiT_T2I(
+        hidden_size=96, num_groups=4, patch_depth=14, txt_embed_dim=32, txt_max_length=12
+    ).to(device).eval()
+    x = torch.randn(1, 3, 128, 96, device=device)
+    y = torch.randn(1, 12, 32, device=device)
+    t = torch.tensor(500.0, device=device)
+    with torch.no_grad():
+        seg = {"feature_layers": [0, 3]}
+        core(x, t, y, segment_data=seg)
+        s0, y0 = seg["features"][0], seg["text_features"][0]
+        assert y0.shape == (1, 12, 96), y0.shape
+        L = s0.shape[1]
+        pos_txt = core.fetch_pos_text(12, device)
+
+        # One-directional: concept tokens must not change the image / prompt streams.
+        cpt = torch.randn(1, 5, 96, device=device)
+        blk = core.patch_blocks[0]
+        xa, ya = blk(s0, y0, seg["condition"], seg["pos"], pos_txt)
+        xb, yb, cb, o_x, o_c = blk.forward_with_concepts(
+            s0, y0, cpt, seg["condition"], seg["pos"], pos_txt, pos_txt[2:7]
+        )
+        assert torch.allclose(xa, xb, atol=1e-5) and torch.allclose(ya, yb, atol=1e-5), "concepts leak"
+        assert cb.shape == (1, 5, 96) and o_x.shape == (1, L, 96) and o_c.shape == (1, 5, 96)
+
+        # Concept readout over all blocks, with and without region-restricted blocks.
+        C = 3
+        caps = torch.randn(C, 12, 32, device=device)
+        select = torch.zeros(C, 12, dtype=torch.bool, device=device)
+        select[0, 4:5] = True
+        select[1, 4:7] = True
+        select[2, 4:6] = True
+        regions = torch.zeros(L, 2, device=device)
+        regions[: L // 2, 0] = 1.0
+        regions[L // 2 :, 1] = 1.0
+        for masked, mode in [([], "soft"), ([2, 3], "soft"), ([2, 3], "hard")]:
+            clf = PixelDiTRegionClassifier(
+                readout_block=3, readout="concept", concept_num_blocks=3,
+                concept_masked_blocks=masked, mask_attention=mode,
+            )
+            assert clf.input_layer == 0 and clf.deepest_block == 3
+            concepts = clf.build_concepts(core, caps, select)
+            assert concepts[0].shape == (6, 96) and concepts[2].shape == (C, 3)
+            res = clf.concept_scores(
+                core, s0, y0, seg["condition"], seg["pos"], concepts, regions, regions.T
+            )
+            assert [r[0] for r in res] == [1, 2, 3, "avg"], [r[0] for r in res]
+            for _, scores, image_mean in res:
+                assert scores.shape == (2, C) and image_mean.shape == (C,)
+                assert torch.isfinite(scores).all()
+                assert torch.allclose(scores.sum(-1), torch.ones(2, device=device), atol=1e-4)
+    print("concept readout: ok")
+
+
 if __name__ == "__main__":
     check_feature_hook()
     check_side_adapter()
+    check_classifier()
+    check_concept_readout()
     print("all checks passed")

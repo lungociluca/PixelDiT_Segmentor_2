@@ -89,6 +89,82 @@ def add_san_config(cfg):
     # 0 = patch embedding, k = output of patch block k (1-based). Only blocks up to
     # the deepest listed layer are run; FUSION_MAP refers to these indices.
     cfg.MODEL.PIXELDIT.FEATURE_LAYERS = [1, 2, 3]
+
+    # Zero-shot mask classification with PixelDiT's own image-text attention
+    # (inference only, for now). See san/model/pixeldit_classifier.py.
+    cfg.MODEL.PIXELDIT.CLASSIFIER = CN()
+    cfg.MODEL.PIXELDIT.CLASSIFIER.ENABLED = False
+    # Regions to classify: "gt" = GT segments (one per class present; measures
+    # classification alone, side adapter not used), "pred" = side adapter masks
+    # (needs trained weights; masks weighted by objectness).
+    cfg.MODEL.PIXELDIT.CLASSIFIER.MASK_SOURCE = "gt"
+    # Block (1-based) whose attention q/k are used to score image tokens against
+    # class tokens. The NUM_MASKED_BLOCKS blocks before it run on image tokens only,
+    # with attention restricted to each token's region; their input is PixelDiT
+    # layer READOUT_BLOCK - NUM_MASKED_BLOCKS - 1.
+    cfg.MODEL.PIXELDIT.CLASSIFIER.READOUT_BLOCK = 5
+    cfg.MODEL.PIXELDIT.CLASSIFIER.NUM_MASKED_BLOCKS = 1
+    # "soft": bias log(P(same region) + SOFT_EPS); "hard": attend only within the
+    # argmax region; "none": unrestricted image-only attention (ablation).
+    cfg.MODEL.PIXELDIT.CLASSIFIER.MASK_ATTENTION = "soft"
+    cfg.MODEL.PIXELDIT.CLASSIFIER.SOFT_EPS = 1e-4
+    cfg.MODEL.PIXELDIT.CLASSIFIER.PROMPT_TEMPLATE = "A picture of a {target}"
+    # Class tokens used as keys: "name" = tokens of the class name only,
+    # "all" = all prompt tokens except BOS.
+    cfg.MODEL.PIXELDIT.CLASSIFIER.TEXT_TOKENS = "name"
+    # Pooling of a token's logits over a class's tokens: "lme" (log-mean-exp),
+    # "max" or "mean". Heads are averaged.
+    cfg.MODEL.PIXELDIT.CLASSIFIER.TOKEN_POOL = "lme"
+    # Mask scores are divided by this before the softmax over classes.
+    cfg.MODEL.PIXELDIT.CLASSIFIER.TEMPERATURE = 1.0
+    # Noise levels for the classifier branch: continuous flow times t in (0, 1]
+    # (same units as t2i/config.py timestep; the model receives 1000 * t). For each
+    # t, PixelDiT runs (up to the classifier's input layer) on
+    # x_t = (1 - t) * x + t * eps. Empty = reuse the stage-1 pass (clean image at
+    # t2i timestep). With several values, one eval logs segment accuracy for each
+    # (plus their average) and the sem_seg output averages their class probabilities.
+    # The side adapter always uses the stage-1 pass.
+    cfg.MODEL.PIXELDIT.CLASSIFIER.TIMESTEPS = []
+    # eps is drawn per image from seed NOISE_SEED + crc32(file_name), identical for
+    # every t, so runs are reproducible and timesteps are compared on the same noise.
+    cfg.MODEL.PIXELDIT.CLASSIFIER.NOISE_SEED = 0
+    # Removing the per-class offset of the scores (one class otherwise wins every
+    # region). All listed variants are logged; the FIRST one is used for the sem_seg
+    # output. "none"; "image": subtract each class's mean token score over the image
+    # (region vs rest of image); "dataset": subtract each class's mean token score
+    # over all eval images so far (label-free, transductive; noisy for the first
+    # images).
+    cfg.MODEL.PIXELDIT.CLASSIFIER.CALIBRATION = ["none"]
+    # How image tokens are scored against classes.
+    #   "qk": the READOUT_BLOCK's attention logits between image queries and class
+    #         keys from a text-only pass (READOUT_BLOCK / NUM_MASKED_BLOCKS apply).
+    #   "concept": ConceptAttention (Helbling et al., ICML 2025). The class-name
+    #         tokens of each prompt form a concept stream that runs through every
+    #         block next to the normal image + prompt pass: concepts attend to the
+    #         image tokens and to each other, image and prompt never attend to them.
+    #         Score = dot product of the image and concept attention outputs (before
+    #         the output projection). Per-block results and their average are logged.
+    cfg.MODEL.PIXELDIT.CLASSIFIER.READOUT = "qk"
+    cfg.MODEL.PIXELDIT.CLASSIFIER.CONCEPT = CN()
+    # Blocks 1..NUM_BLOCKS are run (PixelDiT has 14).
+    cfg.MODEL.PIXELDIT.CLASSIFIER.CONCEPT.NUM_BLOCKS = 8
+    # Blocks whose outputs are scored; empty = all. With more than one, "avg" (the
+    # token scores averaged over them) gives the sem_seg output.
+    cfg.MODEL.PIXELDIT.CLASSIFIER.CONCEPT.READOUT_BLOCKS = []
+    # Blocks where image-to-image attention is restricted to each token's region
+    # (MASK_ATTENTION soft/hard); image-to-prompt attention stays unrestricted.
+    # Empty = plain ConceptAttention.
+    cfg.MODEL.PIXELDIT.CLASSIFIER.CONCEPT.MASKED_BLOCKS = []
+    # Softmax over classes of each image token's scores (as in ConceptAttention)
+    # before averaging over masks.
+    cfg.MODEL.PIXELDIT.CLASSIFIER.CONCEPT.TOKEN_SOFTMAX = True
+    # Keep the image / prompt / concept residual streams in fp32 (matmuls stay in
+    # the AMP dtype). Needed under float16: the prompt stream exceeds 65504 by block 7.
+    cfg.MODEL.PIXELDIT.CLASSIFIER.CONCEPT.FP32_RESIDUAL = True
+    # Prepend the same "Enhanced prompt" instruction (CHI) the image prompt
+    # (t2i/config.py default_prompt) starts with, so class prompts are
+    # "<CHI> User Prompt: A picture of a dog" as in generation.
+    cfg.MODEL.PIXELDIT.CLASSIFIER.USE_CHI_PREFIX = False
     # side adapter
     cfg.MODEL.SIDE_ADAPTER = CN()
     # "PixelDiTSideAdapterNetwork": masks + objectness, fused with PixelDiT features.
