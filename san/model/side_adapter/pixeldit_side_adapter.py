@@ -110,7 +110,10 @@ class PixelDiTSideAdapterNetwork(RegionwiseSideAdapterNetwork):
                 for tgt, src in x2side_map.items()
             }
         )
-        num_classes = 1 if cfg.MODEL.SAN.CLASS_AGNOSTIC else cfg.MODEL.SAN.NUM_CLASSES
+        # Object / no-object only when classes come from elsewhere: the oracle
+        # (CLASS_AGNOSTIC) or the PixelDiT concept classifier.
+        objectness_only = cfg.MODEL.SAN.CLASS_AGNOSTIC or cfg.MODEL.PIXELDIT.CLASSIFIER.ENABLED
+        num_classes = 1 if objectness_only else cfg.MODEL.SAN.NUM_CLASSES
         return {
             "vit_model": vit,
             "num_queries": sa.NUM_QUERIES,

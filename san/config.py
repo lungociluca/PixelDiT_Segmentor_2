@@ -23,6 +23,8 @@ def add_san_config(cfg):
         "pos_embed",
         "query_embed",
         "relative_position_bias_table",
+        "block_logits",      # concept classifier block weights
+        "log_temperature",   # concept classifier temperature
     ]
     cfg.SOLVER.OPTIMIZER = "ADAMW"
     cfg.SOLVER.BACKBONE_MULTIPLIER = 1.0
@@ -43,10 +45,12 @@ def add_san_config(cfg):
     cfg.MODEL.SAN.DICE_WEIGHT = 5.0
     cfg.MODEL.SAN.MASK_WEIGHT = 5.0
     cfg.MODEL.SAN.TRAIN_NUM_POINTS = 112 * 112
+    # Number of classes of the TRAINING vocabulary (must match DATASETS.TRAIN).
     cfg.MODEL.SAN.NUM_CLASSES = 171
-    # Train the query class head as object / no-object only (all GT segments get
-    # label 0, NUM_CLASSES is ignored). Classes then come from the oracle at
-    # inference, so this requires ORACLE_CLASSES.ENABLED.
+    # Mask-only mode, used when MODEL.PIXELDIT.CLASSIFIER.ENABLED is False: train the
+    # query head as object / no-object only (all GT segments get label 0) and take
+    # the classes from the oracle at inference (requires ORACLE_CLASSES.ENABLED).
+    # Ignored when the classifier is enabled (real labels are used).
     cfg.MODEL.SAN.CLASS_AGNOSTIC = True
     cfg.MODEL.SAN.OVERSAMPLE_RATIO = 3.0
     cfg.MODEL.SAN.IMPORTANCE_SAMPLE_RATIO = 0.75
@@ -68,7 +72,9 @@ def add_san_config(cfg):
     # scores of every mask with the ground-truth class it overlaps best, so that
     # evaluation measures only the quality of the class-agnostic masks.
     cfg.MODEL.SAN.ORACLE_CLASSES = CN()
-    cfg.MODEL.SAN.ORACLE_CLASSES.ENABLED = True
+    # With the classifier enabled, the oracle replaces its class predictions at
+    # inference (to measure mask quality alone).
+    cfg.MODEL.SAN.ORACLE_CLASSES.ENABLED = False
     # "max_iou": GT segment with the highest IoU with the binarized mask.
     # "majority": GT class covering most of the binarized mask's pixels.
     cfg.MODEL.SAN.ORACLE_CLASSES.ASSIGNMENT = "max_iou"
@@ -89,6 +95,60 @@ def add_san_config(cfg):
     # 0 = patch embedding, k = output of patch block k (1-based). Only blocks up to
     # the deepest listed layer are run; FUSION_MAP refers to these indices.
     cfg.MODEL.PIXELDIT.FEATURE_LAYERS = [1, 2, 3]
+    # One PixelDiT pass per image, at continuous flow time TIMESTEP on the noised
+    # image x_t = (1 - t) * x + t * eps (the model receives 1000 * t). It feeds both
+    # the side adapter (FEATURE_LAYERS) and the classifier (CLASSIFIER.READOUT_BLOCKS).
+    # Overrides t2i/config.py timestep.
+    cfg.MODEL.PIXELDIT.TIMESTEP = 0.5
+    # Evaluation noise is drawn per image from NOISE_SEED + crc32(file_name), so
+    # results are reproducible; training draws fresh noise every iteration.
+    cfg.MODEL.PIXELDIT.NOISE_SEED = 0
+
+    # Open-vocabulary mask classifier read from PixelDiT's attention
+    # (san/model/concept_classifier.py).
+    cfg.MODEL.PIXELDIT.CLASSIFIER = CN()
+    cfg.MODEL.PIXELDIT.CLASSIFIER.ENABLED = True
+    # Blocks (1-based) whose attention outputs score image tokens against classes.
+    # Zero-shot on VOC GT segments (t = 0.5): blocks 4-8 averaged gave 44% top-1;
+    # blocks after 8 are weaker.
+    cfg.MODEL.PIXELDIT.CLASSIFIER.READOUT_BLOCKS = [4, 5, 6, 7, 8]
+    cfg.MODEL.PIXELDIT.CLASSIFIER.PROMPT_TEMPLATE = "A picture of a {target}"
+    # Prepend the "Enhanced prompt" instruction (CHI) that t2i default_prompt
+    # starts with: "<CHI> User Prompt: A picture of a dog", as in generation.
+    cfg.MODEL.PIXELDIT.CLASSIFIER.USE_CHI_PREFIX = False
+    # Trainable parts (the text side always stays frozen). At their initial values
+    # the classifier is the zero-shot readout.
+    cfg.MODEL.PIXELDIT.CLASSIFIER.LEARN_BLOCK_WEIGHTS = True
+    cfg.MODEL.PIXELDIT.CLASSIFIER.LEARN_TEMPERATURE = True
+    # Linear map on the image attention outputs (identity at init). More capacity,
+    # more risk of overfitting to the training vocabulary.
+    cfg.MODEL.PIXELDIT.CLASSIFIER.IMAGE_ADAPTER = False
+    # Stop the classification loss from shaping the masks.
+    cfg.MODEL.PIXELDIT.CLASSIFIER.DETACH_MASKS = False
+    # A mask averages token class probabilities over tokens with sigmoid above this
+    # (all tokens if none is); 0 = weight every token by its sigmoid.
+    cfg.MODEL.PIXELDIT.CLASSIFIER.MASK_POOL_THRESHOLD = 0.5
+    # Keep the residual streams in fp32 during the pass (the prompt stream exceeds
+    # the float16 range at block 7; matmuls stay in the AMP dtype).
+    cfg.MODEL.PIXELDIT.CLASSIFIER.FP32_RESIDUAL = True
+    # Standardise each token's class scores across classes before the softmax
+    # ("zscore"), or use the raw dot products ("none": the softmax saturates).
+    cfg.MODEL.PIXELDIT.CLASSIFIER.SCORE_NORM = "zscore"
+    cfg.MODEL.PIXELDIT.CLASSIFIER.INIT_TEMPERATURE = 1.0
+    # How a mask turns token scores into class probabilities.
+    #   "probs":  softmax per token, then average the probabilities over the mask
+    #             (ConceptAttention; distributions come out flat).
+    #   "scores": average the standardised scores over the mask, then softmax;
+    #             token noise cancels, the class signal adds up.
+    cfg.MODEL.PIXELDIT.CLASSIFIER.POOLING = "scores"
+    # LR multiplier for the head's scalar parameters (temperature, block weights).
+    # Adam moves a parameter by about lr per step, so at BASE_LR 1e-4 a log-temperature
+    # could change by only ~0.2 in 2000 iterations.
+    cfg.MODEL.PIXELDIT.CLASSIFIER.SCALAR_LR_MULTIPLIER = 100.0
+    # Write head statistics (temperature, block weights, raw score spread, and the
+    # probability / top-1 of the GT class on matched queries) to the training
+    # metrics every LOG_PERIOD iterations (0 = never). Costs one extra matching.
+    cfg.MODEL.PIXELDIT.CLASSIFIER.LOG_PERIOD = 20
     # side adapter
     cfg.MODEL.SIDE_ADAPTER = CN()
     # "PixelDiTSideAdapterNetwork": masks + objectness, fused with PixelDiT features.

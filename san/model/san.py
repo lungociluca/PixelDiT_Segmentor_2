@@ -1,3 +1,5 @@
+import logging
+import zlib
 from typing import List
 
 import open_clip
@@ -7,6 +9,7 @@ from detectron2.layers import ShapeSpec
 from detectron2.modeling import META_ARCH_REGISTRY
 from detectron2.modeling.postprocessing import sem_seg_postprocess
 from detectron2.structures import ImageList
+from detectron2.utils.events import get_event_storage
 from detectron2.utils.memory import retry_if_cuda_oom
 from torch import nn
 from torch.nn import functional as F
@@ -18,6 +21,7 @@ import json
 
 from .criterion import SetCriterion
 from .matcher import HungarianMatcher
+from .concept_classifier import ConceptClassifier
 from .side_adapter import build_side_adapter_network
 from ..utils.amp import resolve_amp_dtype
 
@@ -162,7 +166,12 @@ class SAN(nn.Module):
         side_adapter_cfg: CfgNode,
         feature_layers: List[int],
         class_agnostic: bool,
+        num_classes: int,
+        timestep: float,
+        noise_seed: int,
+        classifier_args: Optional[dict],
         train_dataset_names: List[str],
+        classifier_log_period: int = 0,
         test_dataset_names: List[str],
         sem_seg_postprocess_before_inference: bool = False,
         amp_dtype: Optional[torch.dtype] = None,
@@ -187,24 +196,54 @@ class SAN(nn.Module):
         self.class_agnostic = class_agnostic
         if class_agnostic and not oracle_classes:
             raise ValueError(
-                "MODEL.SAN.CLASS_AGNOSTIC predicts no classes, so it needs "
+                "Without MODEL.PIXELDIT.CLASSIFIER.ENABLED (mask-only mode, "
+                "MODEL.SAN.CLASS_AGNOSTIC) the model predicts no classes, so it needs "
                 "MODEL.SAN.ORACLE_CLASSES.ENABLED to label the masks at inference."
             )
+        if not class_agnostic and classifier_args is None:
+            raise ValueError(
+                "MODEL.SAN.CLASS_AGNOSTIC False needs MODEL.PIXELDIT.CLASSIFIER.ENABLED: "
+                "the side adapter only predicts objectness."
+            )
+
+        # One PixelDiT pass per image at this flow time, on the noised image.
+        if not 0.0 < timestep <= 1.0:
+            raise ValueError(f"MODEL.PIXELDIT.TIMESTEP must lie in (0, 1], got {timestep}")
+        self.timestep = float(timestep)
+        local_config.timestep = self.timestep  # read by DPM_Solver_Wrapper.segment
+        self.noise_seed = int(noise_seed)
+        self.classifier_log_period = int(classifier_log_period)
+
+        self.classifier = None
+        if classifier_args is not None:
+            classifier_args = dict(classifier_args)
+            if classifier_args.pop("use_chi_prefix"):
+                marker = "User Prompt: "
+                if marker not in local_config.default_prompt:
+                    raise ValueError("USE_CHI_PREFIX: no 'User Prompt: ' in t2i default_prompt")
+                classifier_args["prompt_prefix"] = local_config.default_prompt.rsplit(marker, 1)[0] + marker
+            self._classifier_args = classifier_args
 
         # PixelDiT layers fed to the side adapter (0 = patch embedding, k = block k).
         # Only blocks up to the deepest one are built and run.
         self.feature_layers = sorted(set(int(k) for k in feature_layers))
         if not self.feature_layers or self.feature_layers[0] < 0:
             raise ValueError(f"MODEL.PIXELDIT.FEATURE_LAYERS must be non-negative, got {feature_layers}")
-        local_config.layer_count = self.feature_layers[-1]
+        deepest = self.feature_layers[-1]
+        if classifier_args is not None:
+            deepest = max(deepest, max(classifier_args["readout_blocks"]))
+        local_config.layer_count = deepest
 
         self.model, self.tokenizer, self.text_encoder = get_model()
         num_blocks = len(self.model.core.patch_blocks)
-        if self.feature_layers[-1] > num_blocks:
+        if deepest > num_blocks:
             raise ValueError(
-                f"MODEL.PIXELDIT.FEATURE_LAYERS {self.feature_layers} goes deeper than the "
-                f"{num_blocks} PixelDiT patch blocks."
+                f"Need PixelDiT block {deepest} (FEATURE_LAYERS {self.feature_layers}, "
+                f"classifier READOUT_BLOCKS), but the model has only {num_blocks} patch blocks."
             )
+        hidden_size = self.model.core.hidden_size
+        if classifier_args is not None:
+            self.classifier = ConceptClassifier(hidden_size=hidden_size, **self._classifier_args)
 
         # The diffusion model is always conditioned on the dataset-agnostic default prompt.
         default_emb, default_mask, default_tokens = self.embed_condition([local_config.default_prompt])
@@ -217,6 +256,19 @@ class SAN(nn.Module):
         self.class_labels = {}   # dataset_name -> List[str]
         for name in dict.fromkeys(list(train_dataset_names) + list(test_dataset_names)):
             self.class_labels[name] = get_dataset_labels(name)
+        if self.classifier is not None:
+            for name in train_dataset_names:
+                if len(self.class_labels[name]) != num_classes:
+                    raise ValueError(
+                        f"MODEL.SAN.NUM_CLASSES={num_classes}, but training set {name} has "
+                        f"{len(self.class_labels[name])} classes."
+                    )
+
+        # Concept tokens of every vocabulary, built while the text encoder is loaded
+        # and PixelDiT is still in fp32. Not in the state dict (rebuilt each time).
+        self._concepts = {}
+        if self.classifier is not None:
+            self._build_concepts()
 
         del self.tokenizer
         del self.text_encoder
@@ -233,7 +285,6 @@ class SAN(nn.Module):
             torch.cuda.empty_cache()
 
         # Trainable side adapter (kept in fp32; autocast handles the compute dtype).
-        hidden_size = self.model.core.hidden_size
         self.side_adapter_network = build_side_adapter_network(
             side_adapter_cfg,
             {k: ShapeSpec(channels=hidden_size) for k in self.feature_layers},
@@ -268,7 +319,8 @@ class SAN(nn.Module):
         weight_dict.update(aux_weight_dict)
         losses = ["labels", "masks"]
 
-        class_agnostic = cfg.MODEL.SAN.CLASS_AGNOSTIC
+        classifier_enabled = cfg.MODEL.PIXELDIT.CLASSIFIER.ENABLED
+        class_agnostic = cfg.MODEL.SAN.CLASS_AGNOSTIC and not classifier_enabled
         criterion = SetCriterion(
             num_classes=1 if class_agnostic else cfg.MODEL.SAN.NUM_CLASSES,
             matcher=matcher,
@@ -285,6 +337,11 @@ class SAN(nn.Module):
             "side_adapter_cfg": cfg,
             "feature_layers": list(cfg.MODEL.PIXELDIT.FEATURE_LAYERS),
             "class_agnostic": class_agnostic,
+            "num_classes": cfg.MODEL.SAN.NUM_CLASSES,
+            "timestep": cfg.MODEL.PIXELDIT.TIMESTEP,
+            "noise_seed": cfg.MODEL.PIXELDIT.NOISE_SEED,
+            "classifier_args": cls._classifier_args_from_cfg(cfg.MODEL.PIXELDIT.CLASSIFIER),
+            "classifier_log_period": cfg.MODEL.PIXELDIT.CLASSIFIER.LOG_PERIOD,
             "train_dataset_names": list(cfg.DATASETS.TRAIN),
             "test_dataset_names": list(cfg.DATASETS.TEST),
             "sem_seg_postprocess_before_inference": cfg.MODEL.SAN.SEM_SEG_POSTPROCESS_BEFORE_INFERENCE,
@@ -296,6 +353,47 @@ class SAN(nn.Module):
             "oracle_weight_by_objectness": cfg.MODEL.SAN.ORACLE_CLASSES.WEIGHT_BY_OBJECTNESS,
         }
     
+    @staticmethod
+    def _classifier_args_from_cfg(c):
+        if not c.ENABLED:
+            return None
+        return {
+            "readout_blocks": list(c.READOUT_BLOCKS),
+            "prompt_template": c.PROMPT_TEMPLATE,
+            "use_chi_prefix": c.USE_CHI_PREFIX,
+            "learn_block_weights": c.LEARN_BLOCK_WEIGHTS,
+            "learn_temperature": c.LEARN_TEMPERATURE,
+            "image_adapter": c.IMAGE_ADAPTER,
+            "detach_masks": c.DETACH_MASKS,
+            "mask_pool_threshold": c.MASK_POOL_THRESHOLD,
+            "fp32_residual": c.FP32_RESIDUAL,
+            "score_norm": c.SCORE_NORM,
+            "init_temperature": c.INIT_TEMPERATURE,
+            "pooling": c.POOLING,
+        }
+
+    @torch.no_grad()
+    def _build_concepts(self, chunk_size: int = 32):
+        """Concept tokens for the class names of every dataset vocabulary."""
+        core = self.model.core
+        log = logging.getLogger("san")
+        for name, labels in self.class_labels.items():
+            prompts = self.classifier.prompts(labels)
+            embs, attn_mask, select = [], [], []
+            for i in range(0, len(prompts), chunk_size):
+                chunk = prompts[i : i + chunk_size]
+                e, m, _ = self.embed_condition(chunk)  # (n, 1, 300, D), (n, 300)
+                if (m.sum(1) >= m.shape[1]).any():
+                    raise ValueError(f"Class prompts of {name} exceed the 300-token limit")
+                select.append(self.classifier.name_token_mask(self.tokenizer, chunk, m))
+                embs.append(e[:, 0])
+            concepts = self.classifier.build_concepts(core, torch.cat(embs), torch.cat(select))
+            self._concepts[name] = concepts
+            log.info(
+                "Concept classifier: %d classes for %s, %d concept tokens; e.g. %r",
+                len(labels), name, concepts.tokens.shape[0], prompts[0][-60:],
+            )
+
     def embed_condition(self, prompts, with_chi_window=False):
         max_length = 506 if with_chi_window else 300
         caption_token = self.tokenizer(
@@ -311,9 +409,8 @@ class SAN(nn.Module):
         return caption_embs, emb_masks, tokens_count
     
     def run_diffusion_model(self, image, segment_data):
-        """One forward pass of the frozen PixelDiT on the clean image at the fixed
-        timestep local_config.timestep, conditioned on the default prompt. Fills
-        segment_data["hw"] and segment_data["features"] (see PixDiT_T2I.forward)."""
+        """Frozen PixelDiT on `image` at local_config.timestep (= MODEL.PIXELDIT.TIMESTEP),
+        conditioned on the default prompt. Fills segment_data (see PixDiT_T2I.forward)."""
         emb = self.default_emb
         emb_mask = self.default_emb_mask
         tokens_count = self.default_tokens_count
@@ -335,40 +432,85 @@ class SAN(nn.Module):
             segment_data
         )
 
-    def call_model(self, image_tensor, dataset_name):
+    def _noise(self, image_tensor, batched_inputs):
+        """x_t = (1 - t) x + t eps. Fresh eps in training; at evaluation eps is seeded
+        per image (NOISE_SEED + crc32(file_name)) so results are reproducible."""
+        t = self.timestep
+        if self.training:
+            eps = torch.randn_like(image_tensor, dtype=torch.float32)
+        else:
+            eps = torch.empty_like(image_tensor, dtype=torch.float32)
+            for b, inp in enumerate(batched_inputs):
+                key = str(inp.get("file_name", inp.get("image_id", b)))
+                g = torch.Generator(device=image_tensor.device)
+                g.manual_seed(self.noise_seed + zlib.crc32(key.encode()))
+                eps[b] = torch.randn(eps.shape[1:], generator=g, device=image_tensor.device)
+        return (1.0 - t) * image_tensor.float() + t * eps
+
+    def call_model(self, image_tensor, dataset_name, batched_inputs):
         # Autocast here too (not only in the training loop) because evaluation runs
         # without it, and the frozen weights may be in half precision. Inside the
         # trainer's autocast with the same dtype this is a no-op.
         with torch.autocast(
             "cuda", dtype=self.amp_dtype or torch.float32, enabled=self.amp_dtype is not None
         ):
-            mask_logits, mask_preds = self._call_model(image_tensor, dataset_name)
+            mask_logits, mask_preds = self._call_model(image_tensor, dataset_name, batched_inputs)
         return [x.float() for x in mask_logits], [x.float() for x in mask_preds]
 
-    def _call_model(self, image_tensor, dataset_name):
-        """Run the frozen backbone and the side adapter.
+    def _call_model(self, image_tensor, dataset_name, batched_inputs):
+        """One PixelDiT pass on the noised image, the side adapter, and the classifier.
 
         Returns two lists with one entry per deep-supervision block of the side
         adapter during training (the last entry is the final prediction), and a
         single entry at inference:
           mask_logits: (B, Q, K + 1) class logits per mask, last column = no object
-                       (K = 1 when MODEL.SAN.CLASS_AGNOSTIC)
+                       (K = classes of dataset_name with the classifier; K = 1, i.e.
+                       objectness only, in mask-only mode)
           mask_preds:  (B, Q, h, w) mask logits on the patch grid
         """
-        segment_data = {"feature_layers": self.feature_layers}
-        # The backbone is frozen and nothing before it is trained, so no autograd
-        # graph is needed through it, even during training.
+        x_t = self._noise(image_tensor, batched_inputs)
+        concepts = self._concepts.get(dataset_name) if self.classifier is not None else None
+        if self.classifier is not None and concepts is None:
+            raise KeyError(f"No concept vocabulary for {dataset_name}")
+        # PixelDiT is frozen and nothing before it is trained: no autograd graph
+        # through it, even during training.
         with torch.no_grad():
-            self.run_diffusion_model(image_tensor, segment_data)
+            if self.classifier is None:
+                segment_data = {"feature_layers": self.feature_layers}
+                self.run_diffusion_model(x_t, segment_data)
+                features, readout = segment_data["features"], []
+            else:
+                # Embeddings only (layer 0); the blocks run with the concept stream.
+                segment_data = {"feature_layers": [0]}
+                self.run_diffusion_model(x_t, segment_data)
+                features, readout = self.classifier.run_backbone(
+                    self.model.core,
+                    segment_data["features"][0],
+                    segment_data["text_features"][0],
+                    segment_data["condition"],
+                    segment_data["pos"],
+                    concepts,
+                    self.feature_layers,
+                )
 
         h, w = segment_data["hw"]
         # {layer: (B, h*w, hidden)} -> {layer: (B, hidden, h, w)}. fp32 so the
         # fusion LayerNorm statistics are not computed in half precision.
         backbone_features = {
-            k: v.detach().float().transpose(1, 2).reshape(v.shape[0], v.shape[-1], h, w)
-            for k, v in segment_data["features"].items()
+            k: features[k].detach().float().transpose(1, 2).reshape(-1, features[k].shape[-1], h, w)
+            for k in self.feature_layers
         }
-        mask_preds, mask_logits = self.side_adapter_network(image_tensor, backbone_features)
+        mask_preds, objectness = self.side_adapter_network(image_tensor, backbone_features)
+        if self.classifier is None:
+            return objectness, mask_preds
+
+        # The head runs in fp32 (autocast would cast the dot products to half).
+        with torch.autocast("cuda", enabled=False):
+            token_outputs = self.classifier.token_outputs(readout, concepts)  # (B, L, C)
+            mask_logits = [
+                self.classifier.mask_class_logits(token_outputs, m, o)
+                for m, o in zip(mask_preds, objectness)
+            ]
         return mask_logits, mask_preds
 
     def forward(self, batched_inputs):
@@ -382,7 +524,7 @@ class SAN(nn.Module):
         images_tensor = images.tensor
 
         dataset_name = self._dataset_name(batched_inputs)
-        mask_logits, mask_preds = self.call_model(images_tensor, dataset_name)
+        mask_logits, mask_preds = self.call_model(images_tensor, dataset_name, batched_inputs)
         if self.training:
             if "instances" in batched_inputs[0]:
                 gt_instances = [x["instances"].to(local_config.device) for x in batched_inputs]
@@ -404,6 +546,7 @@ class SAN(nn.Module):
             }
 
             losses = self.criterion(outputs, targets)
+            self._log_classifier_stats(outputs, targets)
 
             for k in list(losses.keys()):
                 if k in self.criterion.weight_dict:
@@ -460,6 +603,45 @@ class SAN(nn.Module):
                     )
                 processed_results[-1]["sem_seg"] = r
             return processed_results
+
+    @torch.no_grad()
+    def _log_classifier_stats(self, outputs, targets):
+        """Every LOG_PERIOD iterations: head parameters and raw score spread, plus,
+        on the queries matched to GT segments (final output), the mean probability
+        of the GT class (including objectness), the mean p(GT class | mask), and
+        the top-1 accuracy over classes."""
+        if self.classifier is None or self.classifier_log_period <= 0 or targets is None:
+            return
+        try:
+            storage = get_event_storage()
+        except AssertionError:  # no EventStorage (e.g. called outside the trainer)
+            return
+        if storage.iter % self.classifier_log_period:
+            return
+        stats = self.classifier.stats()
+        logits = outputs["pred_logits"].float()  # (B, Q, C + 1) log-probabilities
+        indices = self.criterion.matcher(
+            {"pred_logits": logits, "pred_masks": outputs["pred_masks"].float()}, targets
+        )
+        p_true, p_cls_true, correct, n = 0.0, 0.0, 0, 0
+        for b, (src, tgt) in enumerate(indices):
+            if len(src) == 0:
+                continue
+            labels = targets[b]["labels"][tgt].to(logits.device)
+            lp = logits[b, src.to(logits.device)]  # (n, C + 1)
+            log_p_obj = torch.logsumexp(lp[:, :-1], dim=-1)
+            p_true += lp.gather(1, labels[:, None]).exp().sum().item()
+            p_cls_true += (lp.gather(1, labels[:, None])[:, 0] - log_p_obj).exp().sum().item()
+            correct += int((lp[:, :-1].argmax(-1) == labels).sum())
+            n += len(src)
+        if n:
+            stats.update(
+                matched_p_true=p_true / n,
+                matched_p_class_true=p_cls_true / n,
+                matched_top1=correct / n,
+            )
+        for k, v in stats.items():
+            storage.put_scalar(f"classifier/{k}", v, smoothing_hint=False)
 
     def _dataset_name(self, batched_inputs):
         names = {x.get("meta", {}).get("dataset_name", self.default_dataset) for x in batched_inputs}

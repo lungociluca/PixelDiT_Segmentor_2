@@ -99,6 +99,50 @@ class MMDiTJointAttention(nn.Module):
 
         return out_x, out_y
 
+    # --- Concept stream (ConceptAttention) -------------------------------------
+    def _qkv(self, t, qkv, q_norm, k_norm, pos):
+        """q, k, v as (B, N, heads, head_dim) after QK RMSNorm and RoPE, as in forward."""
+        B, N, C = t.shape
+        q, k, v = qkv(t).reshape(B, N, 3, self.num_heads, self.head_dim).unbind(2)
+        q, k = q_norm(q), k_norm(k)
+        if pos is not None:
+            q, k = apply_rotary_emb(q, k, freqs_cis=pos)
+        return q, k, v
+
+    @staticmethod
+    def _attend(q, k, v, attn_mask=None):
+        """(B, N, heads, head_dim) inputs -> (B, N, heads * head_dim)."""
+        out = F.scaled_dot_product_attention(
+            q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), attn_mask=attn_mask
+        )
+        return out.transpose(1, 2).flatten(2)
+
+    def forward_with_concepts(self, x, y, cpt, pos_img, pos_txt=None, pos_cpt=None, attn_mask=None):
+        """Joint attention for image x and prompt y exactly as forward, plus concept
+        tokens cpt: they use the text projections and attend to the image tokens and
+        to each other, while x and y never attend to them (image / prompt outputs are
+        unchanged).
+
+        Returns the projected outputs (out_x, out_y, out_cpt) and the attention
+        outputs before the output projection, o_x (B, Nx, C) and o_cpt (B, Nc, C).
+        Both are mixtures of the same value vectors, so they share one space.
+        """
+        Ny = y.shape[1]
+        qx, kx, vx = self._qkv(x, self.qkv_x, self.q_norm_x, self.k_norm_x, pos_img)
+        qy, ky, vy = self._qkv(y, self.qkv_y, self.q_norm_y, self.k_norm_y, pos_txt)
+        qc, kc, vc = self._qkv(cpt, self.qkv_y, self.q_norm_y, self.k_norm_y, pos_cpt)
+        o = self._attend(
+            torch.cat([qy, qx], 1), torch.cat([ky, kx], 1), torch.cat([vy, vx], 1), attn_mask
+        )
+        o_y, o_x = o[:, :Ny], o[:, Ny:]
+        if qc.shape[0] != qx.shape[0]:
+            qc, kc, vc = (t.expand(qx.shape[0], -1, -1, -1) for t in (qc, kc, vc))
+        o_c = self._attend(qc, torch.cat([kx, kc], 1), torch.cat([vx, vc], 1))
+        out_x = self.proj_drop_x(self.proj_x(o_x))
+        out_y = self.proj_drop_y(self.proj_y(o_y))
+        out_c = self.proj_drop_y(self.proj_y(o_c))
+        return out_x, out_y, out_c, o_x, o_c
+
 class MMDiTBlockT2I(nn.Module):
     def __init__(self, hidden_size, groups, mlp_ratio=4.0, adaLN_modulation_img=None, adaLN_modulation_txt=None, block_id=-1):
         super().__init__()
@@ -137,6 +181,34 @@ class MMDiTBlockT2I(nn.Module):
         x = x + gate_mlp_x * self.mlp_x(apply_adaln(self.norm_x2(x), shift_mlp_x, scale_mlp_x))
         y = y + gate_mlp_y * self.mlp_y(apply_adaln(self.norm_y2(y), shift_mlp_y, scale_mlp_y))
         return x, y
+
+    def forward_with_concepts(self, x, y, cpt, c, pos_img, pos_txt=None, pos_cpt=None, attn_mask=None):
+        """forward(x, y) plus a one-directional concept stream cpt, updated with the
+        text-stream weights and modulation. Returns x, y, cpt and the pre-projection
+        attention outputs o_x, o_cpt.
+
+        Residual updates are computed in each stream's own dtype, so fp32 x / y / cpt
+        keep the residual streams in fp32 under float16 autocast (the prompt stream
+        exceeds the float16 range at block 7)."""
+        shift_msa_x, scale_msa_x, gate_msa_x, shift_mlp_x, scale_mlp_x, gate_mlp_x = self.adaLN_modulation_img(c).chunk(6, dim=-1)
+        shift_msa_y, scale_msa_y, gate_msa_y, shift_mlp_y, scale_mlp_y, gate_mlp_y = self.adaLN_modulation_txt(c).chunk(6, dim=-1)
+        attn_x, attn_y, attn_c, o_x, o_c = self.attn.forward_with_concepts(
+            apply_adaln(self.norm_x1(x), shift_msa_x, scale_msa_x),
+            apply_adaln(self.norm_y1(y), shift_msa_y, scale_msa_y),
+            apply_adaln(self.norm_y1(cpt), shift_msa_y, scale_msa_y),
+            pos_img, pos_txt, pos_cpt, attn_mask,
+        )
+
+        def res(stream, gate, update):
+            return stream + gate.to(stream.dtype) * update.to(stream.dtype)
+
+        x = res(x, gate_msa_x, attn_x)
+        y = res(y, gate_msa_y, attn_y)
+        cpt = res(cpt, gate_msa_y, attn_c)
+        x = res(x, gate_mlp_x, self.mlp_x(apply_adaln(self.norm_x2(x), shift_mlp_x, scale_mlp_x)))
+        y = res(y, gate_mlp_y, self.mlp_y(apply_adaln(self.norm_y2(y), shift_mlp_y, scale_mlp_y)))
+        cpt = res(cpt, gate_mlp_y, self.mlp_y(apply_adaln(self.norm_y2(cpt), shift_mlp_y, scale_mlp_y)))
+        return x, y, cpt, o_x, o_c
 
 class PixDiT_T2I(nn.Module):
     def __init__(
@@ -285,6 +357,9 @@ class PixDiT_T2I(nn.Module):
             # outputs of all run blocks are stacked in segment_data["patch_features"]
             # as (B, layers, Hs*Ws, hidden), as before.
             segment_data["hw"] = (Hs, Ws)
+            # Everything needed to run the patch blocks outside this method.
+            segment_data["condition"] = condition  # (B, 1, hidden) adaLN input
+            segment_data["pos"] = pos              # image RoPE table for (Hs, Ws)
             tap_layers = segment_data.get("feature_layers")
             if tap_layers is not None:
                 tap_layers = sorted(set(int(k) for k in tap_layers))
@@ -296,6 +371,7 @@ class PixDiT_T2I(nn.Module):
                 # Blocks deeper than the last tapped layer are not needed.
                 num_blocks = tap_layers[-1] if tap_layers else 0
                 features = {}
+                text_features = {}  # prompt tokens (B, Ltxt, hidden) at the same layers
             patch_features = []
 
         if s is None:
@@ -316,6 +392,7 @@ class PixDiT_T2I(nn.Module):
             s = s0
             if tap_layers is not None and 0 in tap_layers:
                 features[0] = s0
+                text_features[0] = y_emb
 
             for i in range(num_blocks):
                 s, y_emb = self.patch_blocks[i](s, y_emb, condition, pos, pos_txt, attn_mask_joint)
@@ -324,11 +401,13 @@ class PixDiT_T2I(nn.Module):
                 if tap_layers is not None:
                     if (i + 1) in tap_layers:
                         features[i + 1] = s
+                        text_features[i + 1] = y_emb
                 elif segment_data is not None:
                     patch_features.append(s)
 
             if tap_layers is not None:
                 segment_data["features"] = features
+                segment_data["text_features"] = text_features
             elif segment_data is not None:
                 segment_data["patch_features"] = torch.stack(patch_features, dim=1)
         return x

@@ -5,7 +5,7 @@ SOLVER:
   IMS_PER_BATCH: 2      # micro-batch per GPU step (what has to fit in memory)
   GRAD_ACCUM_STEPS: 8   # optimizer step every 4 micro-batches -> effective batch 4
   BASE_LR: 0.0001
-  MAX_ITER: 5000
+  MAX_ITER: 3000
   WARMUP_FACTOR: 1.0
   WARMUP_ITERS: 0
   WEIGHT_DECAY: 0.0001

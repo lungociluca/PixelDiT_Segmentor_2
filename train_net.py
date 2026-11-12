@@ -170,6 +170,11 @@ class Trainer(DefaultTrainer):
                 weight_decay = cfg.SOLVER.WEIGHT_DECAY
                 if "side_adapter_network" in module_name:
                     lr = lr * cfg.SOLVER.BACKBONE_MULTIPLIER
+                # Concept-classifier scalars (temperature, block weights).
+                if module_name.split(".")[-1] == "classifier" and param_name in (
+                    "block_logits", "log_temperature"
+                ):
+                    lr = lr * cfg.MODEL.PIXELDIT.CLASSIFIER.SCALAR_LR_MULTIPLIER
                 if any(x in param_name for x in embed_names):
                     weight_decay = cfg.SOLVER.WEIGHT_DECAY_EMBED
                 if isinstance(module, norm_module_types):

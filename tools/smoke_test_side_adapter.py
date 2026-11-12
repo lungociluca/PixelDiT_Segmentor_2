@@ -129,7 +129,86 @@ def check_side_adapter():
     print("eval: ok")
 
 
+def check_concept_classifier():
+    from san.model.concept_classifier import ConceptClassifier
+
+    local_config.layer_count = 4
+    core = PixDiT_T2I(
+        hidden_size=96, num_groups=4, patch_depth=14, txt_embed_dim=32, txt_max_length=12
+    ).to(device).eval()
+    B, H, W = 2, 128, 96
+    x = torch.randn(B, 3, H, W, device=device)
+    y = torch.randn(1, 12, 32, device=device)
+    t = torch.full((B,), 500.0, device=device)  # the DPM wrapper passes one t per image
+    C, Q = 3, 5
+    caps = torch.randn(C, 12, 32, device=device)
+    select = torch.zeros(C, 12, dtype=torch.bool, device=device)
+    select[0, 4:5] = True
+    select[1, 4:7] = True
+    select[2, 4:6] = True
+
+    with torch.no_grad():
+        ref = {"feature_layers": [1, 2, 3]}
+        core(x, t, y, segment_data=ref)
+        emb = {"feature_layers": [0]}
+        core(x, t, y, segment_data=emb)
+    h, w = ref["hw"]
+    L = h * w
+
+    for adapter, detach, pooling in [
+        (False, False, "probs"), (False, False, "scores"), (True, True, "scores")
+    ]:
+        clf = ConceptClassifier(
+            hidden_size=96, readout_blocks=[2, 4], image_adapter=adapter, detach_masks=detach,
+            pooling=pooling,
+        ).to(device)
+        concepts = clf.build_concepts(core, caps, select)
+        assert concepts.tokens.shape == (6, 96) and concepts.pool.shape == (6, C)
+        assert torch.allclose(concepts.pool.sum(0), torch.ones(C, device=device))
+        features, readout = clf.run_backbone(
+            core, emb["features"][0], emb["text_features"][0], emb["condition"], emb["pos"],
+            concepts, [1, 2, 3],
+        )
+        # The concept stream is one-directional: same image features as a normal pass.
+        for k in (1, 2, 3):
+            assert torch.allclose(features[k], ref["features"][k], atol=1e-4), f"layer {k} changed"
+        assert len(readout) == 2
+
+        probs = clf.token_outputs(readout, concepts)
+        assert probs.shape == (B, L, C)
+        if pooling == "probs":
+            assert torch.allclose(probs.sum(-1), torch.ones(B, L, device=device), atol=1e-5)
+        else:  # block-weighted standardised scores: zero mean across classes
+            assert torch.allclose(probs.mean(-1), torch.zeros(B, L, device=device), atol=1e-4)
+        if not adapter:
+            # zscore: invariant to the scale of the dot products, so the softmax
+            # cannot saturate however large the raw scores are.
+            big = [(o_x * 100.0, o_c * 10.0) for o_x, o_c in readout]
+            assert torch.allclose(clf.token_outputs(big, concepts), probs, atol=1e-4), "zscore not scale-free"
+            probs = clf.token_outputs(readout, concepts)  # restore stats of the real scores
+        st = clf.stats()
+        assert {"temperature", "block_weight_2", "block_weight_4", "raw_score_std_2"} <= set(st), st
+
+        mask_preds = torch.randn(B, Q, h, w, device=device, requires_grad=True)
+        objectness = torch.randn(B, Q, 2, device=device, requires_grad=True)
+        logits = clf.mask_class_logits(probs, mask_preds, objectness)
+        assert logits.shape == (B, Q, C + 1)
+        # Log-probabilities of a proper C + 1 distribution.
+        assert torch.allclose(logits.logsumexp(-1), torch.zeros(B, Q, device=device), atol=1e-4)
+
+        target = torch.randint(0, C + 1, (B * Q,), device=device)
+        torch.nn.functional.cross_entropy(logits.flatten(0, 1), target).backward()
+        trainable = {n: p for n, p in clf.named_parameters()}
+        assert {"block_logits", "log_temperature"} <= set(trainable), trainable.keys()
+        for n, p in trainable.items():
+            assert p.grad is not None and torch.isfinite(p.grad).all(), n
+        assert objectness.grad is not None
+        assert (mask_preds.grad is None) == detach, "DETACH_MASKS not respected"
+    print("concept classifier: ok")
+
+
 if __name__ == "__main__":
     check_feature_hook()
     check_side_adapter()
+    check_concept_classifier()
     print("all checks passed")
