@@ -241,6 +241,26 @@ def setup(args):
     return cfg
 
 
+def write_eval_results(cfg, res):
+    """Write eval-only results to OUTPUT_DIR/eval_results.json as one JSON line with the
+    same keys as metrics.json ("<dataset>/sem_seg/IoU-<class>", ...), so tools that
+    read metrics.json (e.g. tools/class_breakdown.py) work on it too."""
+    import json
+
+    # detectron2 returns {dataset: {task: metrics}}, or {task: metrics} for one dataset.
+    if not all(isinstance(v, dict) and any(isinstance(x, dict) for x in v.values()) for v in res.values()):
+        res = {cfg.DATASETS.TEST[0]: res}
+    flat = {"iteration": None, "weights": cfg.MODEL.WEIGHTS}
+    for dataset, tasks in res.items():
+        for task, metrics in tasks.items():
+            for k, v in metrics.items():
+                flat[f"{dataset}/{task}/{k}"] = float(v)
+    path = os.path.join(cfg.OUTPUT_DIR, "eval_results.json")
+    with open(path, "a") as f:
+        f.write(json.dumps(flat) + "\n")
+    logging.getLogger("san").info("Wrote evaluation results to %s", path)
+
+
 def main(args):
     cfg = setup(args)
 
@@ -254,6 +274,7 @@ def main(args):
             res.update(Trainer.test_with_TTA(cfg, model))
         if comm.is_main_process():
             verify_results(cfg, res)
+            write_eval_results(cfg, res)
         return res
 
     trainer = Trainer(cfg)

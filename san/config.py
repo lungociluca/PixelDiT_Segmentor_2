@@ -112,7 +112,20 @@ def add_san_config(cfg):
     # Zero-shot on VOC GT segments (t = 0.5): blocks 4-8 averaged gave 44% top-1;
     # blocks after 8 are weaker.
     cfg.MODEL.PIXELDIT.CLASSIFIER.READOUT_BLOCKS = [4, 5, 6, 7, 8]
-    cfg.MODEL.PIXELDIT.CLASSIFIER.PROMPT_TEMPLATE = "A picture of a {target}"
+    # Every class is encoded with each template (scores averaged over them). Only the
+    # name's own tokens become concept tokens, not the template words around it.
+    cfg.MODEL.PIXELDIT.CLASSIFIER.PROMPT_TEMPLATES = [
+        "A picture of a {target}",
+        "A photo of the {target}.",
+        "There is {target} in the scene.",
+    ]
+    # Class names that are synonym lists ("road, route", "sidewalk, pavement") get one
+    # prompt per synonym instead of one prompt with the whole list.
+    cfg.MODEL.PIXELDIT.CLASSIFIER.SPLIT_SYNONYMS = True
+    # Each prompt's tokens attend to the image and to themselves only, not to other
+    # classes, so scores do not depend on the vocabulary (171 classes in training,
+    # 150 / 847 at test).
+    cfg.MODEL.PIXELDIT.CLASSIFIER.ISOLATE_CONCEPTS = True
     # Prepend the "Enhanced prompt" instruction (CHI) that t2i default_prompt
     # starts with: "<CHI> User Prompt: A picture of a dog", as in generation.
     cfg.MODEL.PIXELDIT.CLASSIFIER.USE_CHI_PREFIX = False

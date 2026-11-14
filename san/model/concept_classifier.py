@@ -42,10 +42,24 @@ logger = logging.getLogger("san")
 
 
 class Concepts(NamedTuple):
-    """Concept tokens of one vocabulary (C classes, Nt tokens in total)."""
+    """Concept tokens of one vocabulary (C classes, P prompts, Nt tokens in total)."""
     tokens: torch.Tensor     # (Nt, hidden) embedded tokens, fp32
     positions: torch.Tensor  # (Nt,) token positions in their prompt (for the text RoPE)
-    pool: torch.Tensor       # (Nt, C) averages each class's tokens: scores @ pool
+    pool: torch.Tensor       # (Nt, C): scores @ pool = mean over the class's prompts of
+                             # the mean over each prompt's tokens
+    group: torch.Tensor      # (Nt,) prompt index of each token (for isolate_concepts)
+
+
+class PromptSpec(NamedTuple):
+    """One prompt of a class: prefix + name + suffix (the name tokens are the concept)."""
+    owner: int   # class index
+    prefix: str  # text before the name (CHI prefix + template text)
+    name: str    # one synonym of the class name
+    suffix: str  # template text after the name
+
+    @property
+    def text(self) -> str:
+        return self.prefix + self.name + self.suffix
 
 
 class ConceptClassifier(nn.Module):
@@ -54,7 +68,9 @@ class ConceptClassifier(nn.Module):
         *,
         hidden_size: int,
         readout_blocks: List[int],
-        prompt_template: str = "A picture of a {target}",
+        prompt_templates: Tuple[str, ...] = ("A picture of a {target}",),
+        split_synonyms: bool = True,
+        isolate_concepts: bool = True,
         prompt_prefix: str = "",
         learn_block_weights: bool = True,
         learn_temperature: bool = True,
@@ -70,9 +86,13 @@ class ConceptClassifier(nn.Module):
         self.readout_blocks = sorted(set(int(b) for b in readout_blocks))
         if not self.readout_blocks or self.readout_blocks[0] < 1:
             raise ValueError(f"READOUT_BLOCKS must be 1-based block numbers, got {readout_blocks}")
-        if "{target}" not in prompt_template:
-            raise ValueError(f"PROMPT_TEMPLATE must contain '{{target}}', got {prompt_template!r}")
-        self.prompt_template = prompt_template
+        prompt_templates = list(prompt_templates)
+        bad = [t for t in prompt_templates if t.count("{target}") != 1]
+        if not prompt_templates or bad:
+            raise ValueError(f"PROMPT_TEMPLATES must each contain '{{target}}' once, got {prompt_templates!r}")
+        self.prompt_templates = prompt_templates
+        self.split_synonyms = bool(split_synonyms)
+        self.isolate_concepts = bool(isolate_concepts)
         self.prompt_prefix = prompt_prefix
         self.detach_masks = bool(detach_masks)
         self.mask_pool_threshold = float(mask_pool_threshold)
@@ -110,52 +130,84 @@ class ConceptClassifier(nn.Module):
         return self.readout_blocks[-1]
 
     # --------------------------------------------------------------- vocabulary
-    def prompts(self, class_names: List[str]) -> List[str]:
-        return [self.prompt_prefix + self.prompt_template.format(target=c) for c in class_names]
+    def prompt_specs(self, class_names: List[str]) -> List[PromptSpec]:
+        """Every (class, synonym, template) prompt. With split_synonyms, a name like
+        "road, route" gives one prompt per synonym ("road", "route") instead of one
+        prompt containing the whole list."""
+        specs = []
+        for c, name in enumerate(class_names):
+            names = [n.strip() for n in name.split(",")] if self.split_synonyms else [name.strip()]
+            names = [n for n in dict.fromkeys(names) if n] or [name.strip()]
+            for n in names:
+                for template in self.prompt_templates:
+                    before, after = template.split("{target}")
+                    specs.append(PromptSpec(c, self.prompt_prefix + before, n, after))
+        return specs
 
-    def name_token_mask(self, tokenizer, prompts: List[str], attention_mask: torch.Tensor) -> torch.Tensor:
-        """(N, L) bool: the tokens of each prompt after the prefix and the template's
-        text before the class name (e.g. "dog" in "A picture of a dog"). The
-        tokenizer pads on the right, so a prompt's tokens are at positions 0..n-1."""
+    def name_token_mask(self, tokenizer, specs: List[PromptSpec], attention_mask: torch.Tensor) -> torch.Tensor:
+        """(N, L) bool: the tokens of each prompt that encode the name (e.g. "dog" in
+        "A picture of a dog", not the template words around it): the tokens of
+        prefix + name minus those of the prefix. The tokenizer pads on the right, so a
+        prompt's tokens are at positions 0..n-1."""
         select = torch.zeros_like(attention_mask, dtype=torch.bool)
-        prefix = (self.prompt_prefix + self.prompt_template.split("{target}")[0]).rstrip()
-        prefix_ids = tokenizer(prefix)["input_ids"] if prefix else []
         bos = getattr(tokenizer, "bos_token_id", None)
-        for i, prompt in enumerate(prompts):
-            ids = tokenizer(prompt)["input_ids"]
+        prefix_cache = {}
+        for i, spec in enumerate(specs):
+            ids = tokenizer(spec.text)["input_ids"]
             n_real = int(attention_mask[i].sum())
             if n_real != len(ids) or not bool(attention_mask[i, :n_real].all()):
                 raise RuntimeError(
-                    f"Unexpected tokenization for {prompt!r}: {len(ids)} ids vs {n_real} real "
+                    f"Unexpected tokenization for {spec.text!r}: {len(ids)} ids vs {n_real} real "
                     "positions (expected right padding, no truncation)."
                 )
+            prefix = spec.prefix.rstrip()
+            if prefix not in prefix_cache:
+                prefix_cache[prefix] = tokenizer(prefix)["input_ids"] if prefix else []
+            prefix_ids = prefix_cache[prefix]
+            head_ids = tokenizer((spec.prefix + spec.name).rstrip())["input_ids"]
             start = 1 if (ids and ids[0] == bos) else 0
-            if prefix_ids and ids[: len(prefix_ids)] == prefix_ids and len(ids) > len(prefix_ids):
+            end = len(ids)
+            if prefix_ids and ids[: len(prefix_ids)] == prefix_ids:
                 start = len(prefix_ids)
             elif prefix_ids:
-                logger.warning("Could not locate the class name in %r; using all its tokens.", prompt)
-            select[i, start : len(ids)] = True
+                logger.warning("Could not locate the prefix in %r; name starts at its first token.", spec.text)
+            if ids[: len(head_ids)] == head_ids and len(head_ids) > start:
+                end = len(head_ids)
+            elif spec.suffix.strip():
+                logger.warning("Could not locate the end of the name in %r; using all tokens after the prefix.", spec.text)
+            if end <= start:
+                raise RuntimeError(f"No name tokens found in {spec.text!r}")
+            select[i, start:end] = True
         return select
 
     @torch.no_grad()
-    def build_concepts(self, core, caption_embs: torch.Tensor, token_select: torch.Tensor) -> Concepts:
-        """caption_embs: (C, L, D) text-encoder outputs of the class prompts;
-        token_select: (C, L) bool. The selected tokens are embedded as PixelDiT embeds
-        prompt tokens (y_embedder + y_pos_embedding at the token's position)."""
+    def build_concepts(
+        self, core, name_embs: List[torch.Tensor], name_positions: List[torch.Tensor],
+        owners: List[int], num_classes: int,
+    ) -> Concepts:
+        """name_embs[p]: (n_p, D) text-encoder outputs of prompt p's name tokens, at
+        positions name_positions[p] (n_p,) of the prompt; owners[p]: its class. The
+        tokens are embedded as PixelDiT embeds prompt tokens (y_embedder +
+        y_pos_embedding at the token's position)."""
         weight = core.y_embedder.proj.weight
         device = weight.device
-        tokens, positions, owner = [], [], []
-        for c in range(caption_embs.shape[0]):
-            pos = token_select[c].nonzero().flatten().to(device)
-            emb = core.y_embedder(caption_embs[c, pos].to(device, weight.dtype)[None])[0]
+        prompts_per_class = torch.bincount(torch.tensor(owners), minlength=num_classes).float()
+        if (prompts_per_class == 0).any():
+            raise ValueError("Every class needs at least one prompt")
+        tokens, positions, groups, weights, owner_tok = [], [], [], [], []
+        for p in range(len(name_embs)):
+            pos = name_positions[p].to(device)
+            emb = core.y_embedder(name_embs[p].to(device, weight.dtype)[None])[0]
             emb = emb + core.y_pos_embedding[0, pos].to(emb.dtype)
             tokens.append(emb.float())
             positions.append(pos)
-            owner.append(torch.full((len(pos),), c, device=device))
-        owner = torch.cat(owner)
-        pool = F.one_hot(owner, caption_embs.shape[0]).float()
-        pool = pool / pool.sum(0, keepdim=True)
-        return Concepts(torch.cat(tokens), torch.cat(positions), pool)
+            groups.append(torch.full((len(pos),), p, device=device))
+            owner_tok.append(torch.full((len(pos),), owners[p], device=device))
+            # mean over the prompt's tokens, then over the class's prompts
+            w = 1.0 / (len(pos) * prompts_per_class[owners[p]].item())
+            weights.append(torch.full((len(pos),), w, device=device))
+        pool = F.one_hot(torch.cat(owner_tok), num_classes).float() * torch.cat(weights)[:, None]
+        return Concepts(torch.cat(tokens), torch.cat(positions), pool, torch.cat(groups))
 
     # ------------------------------------------------------------ PixelDiT pass
     @torch.no_grad()
@@ -181,10 +233,20 @@ class ConceptClassifier(nn.Module):
         dtype = torch.float32 if self.fp32_residual else s0.dtype
         x, y = s0.to(dtype), y0.to(dtype)
         pos_y = core.fetch_pos_text(Ny, s0.device) if core.use_text_rope else None
-        cpt = pos_c = None
+        cpt = pos_c = cpt_mask = None
         last = max(feature_layers) if feature_layers else 0
         if concepts is not None:
             cpt = concepts.tokens[None].to(dtype)
+            if self.isolate_concepts:
+                # Each prompt's tokens attend to the image and to themselves only, so a
+                # class's scores do not depend on which other classes are in the
+                # vocabulary (171 in training, 150 / 847 at test).
+                L = s0.shape[1]
+                g = concepts.group.to(s0.device)
+                cpt_mask = torch.cat(
+                    [torch.ones(len(g), L, dtype=torch.bool, device=s0.device), g[:, None] == g[None, :]],
+                    dim=1,
+                )
             if core.use_text_rope:
                 n = max(Ny, int(concepts.positions.max()) + 1)
                 pos_c = core.fetch_pos_text(n, s0.device)[concepts.positions]
@@ -198,7 +260,9 @@ class ConceptClassifier(nn.Module):
             b = i + 1
             block = core.patch_blocks[i]
             if cpt is not None and b <= self.num_blocks:
-                x, y, cpt, o_x, o_c = block.forward_with_concepts(x, y, cpt, condition, pos, pos_y, pos_c)
+                x, y, cpt, o_x, o_c = block.forward_with_concepts(
+                    x, y, cpt, condition, pos, pos_y, pos_c, cpt_attn_mask=cpt_mask
+                )
                 if b in self.readout_blocks:
                     readout.append((o_x, o_c))
             else:

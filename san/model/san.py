@@ -359,7 +359,9 @@ class SAN(nn.Module):
             return None
         return {
             "readout_blocks": list(c.READOUT_BLOCKS),
-            "prompt_template": c.PROMPT_TEMPLATE,
+            "prompt_templates": tuple(c.PROMPT_TEMPLATES),
+            "split_synonyms": c.SPLIT_SYNONYMS,
+            "isolate_concepts": c.ISOLATE_CONCEPTS,
             "use_chi_prefix": c.USE_CHI_PREFIX,
             "learn_block_weights": c.LEARN_BLOCK_WEIGHTS,
             "learn_temperature": c.LEARN_TEMPERATURE,
@@ -378,20 +380,25 @@ class SAN(nn.Module):
         core = self.model.core
         log = logging.getLogger("san")
         for name, labels in self.class_labels.items():
-            prompts = self.classifier.prompts(labels)
-            embs, attn_mask, select = [], [], []
-            for i in range(0, len(prompts), chunk_size):
-                chunk = prompts[i : i + chunk_size]
-                e, m, _ = self.embed_condition(chunk)  # (n, 1, 300, D), (n, 300)
+            specs = self.classifier.prompt_specs(labels)
+            name_embs, name_pos = [], []
+            for i in range(0, len(specs), chunk_size):
+                chunk = specs[i : i + chunk_size]
+                e, m, _ = self.embed_condition([s.text for s in chunk])  # (n, 1, 300, D), (n, 300)
                 if (m.sum(1) >= m.shape[1]).any():
                     raise ValueError(f"Class prompts of {name} exceed the 300-token limit")
-                select.append(self.classifier.name_token_mask(self.tokenizer, chunk, m))
-                embs.append(e[:, 0])
-            concepts = self.classifier.build_concepts(core, torch.cat(embs), torch.cat(select))
+                select = self.classifier.name_token_mask(self.tokenizer, chunk, m)
+                for j in range(len(chunk)):
+                    pos = select[j].nonzero().flatten()
+                    name_embs.append(e[j, 0, pos.to(e.device)].float())
+                    name_pos.append(pos)
+            concepts = self.classifier.build_concepts(
+                core, name_embs, name_pos, [s.owner for s in specs], len(labels)
+            )
             self._concepts[name] = concepts
             log.info(
-                "Concept classifier: %d classes for %s, %d concept tokens; e.g. %r",
-                len(labels), name, concepts.tokens.shape[0], prompts[0][-60:],
+                "Concept classifier: %s: %d classes, %d prompts, %d concept tokens; e.g. %r",
+                name, len(labels), len(specs), concepts.tokens.shape[0], specs[0].text[-60:],
             )
 
     def embed_condition(self, prompts, with_chi_window=False):

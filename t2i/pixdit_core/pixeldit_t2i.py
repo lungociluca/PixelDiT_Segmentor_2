@@ -117,11 +117,13 @@ class MMDiTJointAttention(nn.Module):
         )
         return out.transpose(1, 2).flatten(2)
 
-    def forward_with_concepts(self, x, y, cpt, pos_img, pos_txt=None, pos_cpt=None, attn_mask=None):
+    def forward_with_concepts(
+        self, x, y, cpt, pos_img, pos_txt=None, pos_cpt=None, attn_mask=None, cpt_attn_mask=None
+    ):
         """Joint attention for image x and prompt y exactly as forward, plus concept
         tokens cpt: they use the text projections and attend to the image tokens and
-        to each other, while x and y never attend to them (image / prompt outputs are
-        unchanged).
+        to each other (cpt_attn_mask: (Nc, Nx + Nc) bool, True = may attend), while x
+        and y never attend to them (image / prompt outputs are unchanged).
 
         Returns the projected outputs (out_x, out_y, out_cpt) and the attention
         outputs before the output projection, o_x (B, Nx, C) and o_cpt (B, Nc, C).
@@ -137,7 +139,7 @@ class MMDiTJointAttention(nn.Module):
         o_y, o_x = o[:, :Ny], o[:, Ny:]
         if qc.shape[0] != qx.shape[0]:
             qc, kc, vc = (t.expand(qx.shape[0], -1, -1, -1) for t in (qc, kc, vc))
-        o_c = self._attend(qc, torch.cat([kx, kc], 1), torch.cat([vx, vc], 1))
+        o_c = self._attend(qc, torch.cat([kx, kc], 1), torch.cat([vx, vc], 1), cpt_attn_mask)
         out_x = self.proj_drop_x(self.proj_x(o_x))
         out_y = self.proj_drop_y(self.proj_y(o_y))
         out_c = self.proj_drop_y(self.proj_y(o_c))
@@ -182,7 +184,9 @@ class MMDiTBlockT2I(nn.Module):
         y = y + gate_mlp_y * self.mlp_y(apply_adaln(self.norm_y2(y), shift_mlp_y, scale_mlp_y))
         return x, y
 
-    def forward_with_concepts(self, x, y, cpt, c, pos_img, pos_txt=None, pos_cpt=None, attn_mask=None):
+    def forward_with_concepts(
+        self, x, y, cpt, c, pos_img, pos_txt=None, pos_cpt=None, attn_mask=None, cpt_attn_mask=None
+    ):
         """forward(x, y) plus a one-directional concept stream cpt, updated with the
         text-stream weights and modulation. Returns x, y, cpt and the pre-projection
         attention outputs o_x, o_cpt.
@@ -196,7 +200,7 @@ class MMDiTBlockT2I(nn.Module):
             apply_adaln(self.norm_x1(x), shift_msa_x, scale_msa_x),
             apply_adaln(self.norm_y1(y), shift_msa_y, scale_msa_y),
             apply_adaln(self.norm_y1(cpt), shift_msa_y, scale_msa_y),
-            pos_img, pos_txt, pos_cpt, attn_mask,
+            pos_img, pos_txt, pos_cpt, attn_mask, cpt_attn_mask,
         )
 
         def res(stream, gate, update):

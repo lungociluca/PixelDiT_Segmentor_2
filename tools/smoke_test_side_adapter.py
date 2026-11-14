@@ -162,7 +162,10 @@ def check_concept_classifier():
             hidden_size=96, readout_blocks=[2, 4], image_adapter=adapter, detach_masks=detach,
             pooling=pooling,
         ).to(device)
-        concepts = clf.build_concepts(core, caps, select)
+        # One prompt per class (the per-prompt name tokens and their positions).
+        name_embs = [caps[c][select[c]] for c in range(C)]
+        name_pos = [select[c].nonzero().flatten() for c in range(C)]
+        concepts = clf.build_concepts(core, name_embs, name_pos, list(range(C)), C)
         assert concepts.tokens.shape == (6, 96) and concepts.pool.shape == (6, C)
         assert torch.allclose(concepts.pool.sum(0), torch.ones(C, device=device))
         features, readout = clf.run_backbone(
@@ -207,8 +210,77 @@ def check_concept_classifier():
     print("concept classifier: ok")
 
 
+class _WordTokenizer:
+    """Stand-in for the Gemma tokenizer: BOS + one id per word / punctuation mark."""
+    bos_token_id = 1
+
+    def __call__(self, text):
+        import re
+        words = re.findall(r"\w+|[^\w\s]", text)
+        return {"input_ids": [self.bos_token_id] + [hash(w) % 10000 + 2 for w in words]}
+
+
+def check_vocabulary():
+    from san.model.concept_classifier import ConceptClassifier
+
+    tok = _WordTokenizer()
+    clf = ConceptClassifier(
+        hidden_size=96, readout_blocks=[2],
+        prompt_templates=("A picture of a {target}", "There is {target} in the scene."),
+    )
+    specs = clf.prompt_specs(["dog", "road, route", "sidewalk, pavement, footway"])
+    assert len(specs) == 2 * (1 + 2 + 3), len(specs)
+    assert [s.owner for s in specs] == [0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2]
+    assert {s.name for s in specs if s.owner == 1} == {"road", "route"}
+    L = 16
+    mask = torch.zeros(len(specs), L, dtype=torch.long)
+    for i, sp in enumerate(specs):
+        mask[i, : len(tok(sp.text)["input_ids"])] = 1
+    sel = clf.name_token_mask(tok, specs, mask)
+    # "A picture of a dog": BOS A picture of a | dog -> position 5 only
+    assert sel[0].nonzero().flatten().tolist() == [5], sel[0]
+    # "There is road in the scene.": BOS There is | road | in the scene . -> position 3
+    assert sel[3].nonzero().flatten().tolist() == [3], sel[3]
+    print("vocabulary: ok")
+
+
+def check_isolated_concepts():
+    """With isolate_concepts, adding classes to the vocabulary must not change the
+    scores of the others (without it, it does)."""
+    from san.model.concept_classifier import ConceptClassifier
+
+    local_config.layer_count = 3
+    core = PixDiT_T2I(
+        hidden_size=96, num_groups=4, patch_depth=14, txt_embed_dim=32, txt_max_length=12
+    ).to(device).eval()
+    x = torch.randn(1, 3, 64, 64, device=device)
+    y = torch.randn(1, 12, 32, device=device)
+    with torch.no_grad():
+        emb = {"feature_layers": [0]}
+        core(x, torch.full((1,), 500.0, device=device), y, segment_data=emb)
+    embs = [torch.randn(n, 32, device=device) for n in (1, 3, 2, 2)]
+    pos = [torch.arange(4, 4 + n) for n in (1, 3, 2, 2)]
+    for isolate in (True, False):
+        clf = ConceptClassifier(hidden_size=96, readout_blocks=[2, 3], isolate_concepts=isolate).to(device)
+        outs = []
+        for n in (3, 4):  # vocabulary of 3 classes, then the same plus one more
+            concepts = clf.build_concepts(core, embs[:n], pos[:n], list(range(n)), n)
+            _, readout = clf.run_backbone(
+                core, emb["features"][0], emb["text_features"][0], emb["condition"], emb["pos"],
+                concepts, [],
+            )
+            # raw output-space scores of the first 3 classes at the last readout block
+            o_x, o_c = readout[-1]
+            outs.append((o_x[0] @ o_c[0].T)[:, : 1 + 3 + 2])
+        same = torch.allclose(outs[0], outs[1], atol=1e-4)
+        assert same == isolate, f"isolate_concepts={isolate}: vocabulary-invariant={same}"
+    print("isolated concepts: ok")
+
+
 if __name__ == "__main__":
     check_feature_hook()
     check_side_adapter()
     check_concept_classifier()
+    check_vocabulary()
+    check_isolated_concepts()
     print("all checks passed")
