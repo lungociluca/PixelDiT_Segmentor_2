@@ -36,7 +36,7 @@ from detectron2.data import MetadataCatalog
 
 def get_dataset_labels(dataset_name: str) -> List[str]:
     """Class names used to build text embeddings for `dataset_name`.
-
+    
     Priority:
       1. local_config.label_json_overrides[dataset_name] (a catseg-style JSON list)
       2. MetadataCatalog stuff_classes (falls back to thing_classes)
