@@ -49,9 +49,14 @@ class MaskObjectnessDecoder(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # query: [B,N,C]  x: [B,C,H,W]
         class_logits = self.class_embed(query)  # [B,N,K+1]
-        mask_preds = torch.einsum(
-            "bqc,bchw->bqhw", self.query_mlp(query), self.pix_mlp(x)
-        )  # [B,N,H,W]
+        query_embed = self.query_mlp(query)
+        pix_embed = self.pix_mlp(x)
+        # Mask logits in fp32: an unnormalised 256-term dot product, which is where
+        # float16 autocast first overflows / loses resolution.
+        with torch.autocast(query.device.type, enabled=False):
+            mask_preds = torch.einsum(
+                "bqc,bchw->bqhw", query_embed.float(), pix_embed.float()
+            )  # [B,N,H,W]
         return mask_preds, class_logits
 
 

@@ -21,6 +21,8 @@ class LayerNorm(nn.Module):
         self.normalized_shape = (normalized_shape,)
 
     def forward(self, x: torch.Tensor):
+        # fp32 statistics: squaring backbone activations overflows float16 at |x| > 256.
+        x = x.float()
         u = x.mean(1, keepdim=True)
         s = (x - u).pow(2).mean(1, keepdim=True)
         x = (x - u) / torch.sqrt(s + self.eps)

@@ -33,7 +33,8 @@ def add_san_config(cfg):
     cfg.SOLVER.GRAD_ACCUM_STEPS = 1
     # Autocast dtype when SOLVER.AMP.ENABLED: "float16" (uses a GradScaler) or
     # "bfloat16" (no scaler needed; falls back to float16 if the GPU lacks bf16).
-    # The frozen PixelDiT weights are stored in this dtype too.
+    # This is the dtype of the trainable side adapter's forward pass; the frozen
+    # PixelDiT follows MODEL.PIXELDIT.PRECISION.
     cfg.SOLVER.AMP.PRECISION = "float16"
 
     # san
@@ -89,6 +90,11 @@ def add_san_config(cfg):
     # 0 = patch embedding, k = output of patch block k (1-based). Only blocks up to
     # the deepest listed layer are run; FUSION_MAP refers to these indices.
     cfg.MODEL.PIXELDIT.FEATURE_LAYERS = [1, 2, 3]
+    # Dtype of the frozen PixelDiT (weights and forward pass):
+    # "auto": bfloat16 when autocast runs in bfloat16, float32 otherwise (PixelDiT was
+    #         trained in bf16; float16 lacks its range and can overflow to inf/NaN).
+    # "float32": always float32.  "amp": always the autocast dtype, even float16.
+    cfg.MODEL.PIXELDIT.PRECISION = "auto"
     # side adapter
     cfg.MODEL.SIDE_ADAPTER = CN()
     # "PixelDiTSideAdapterNetwork": masks + objectness, fused with PixelDiT features.

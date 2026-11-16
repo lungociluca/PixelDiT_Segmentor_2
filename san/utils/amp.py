@@ -37,3 +37,28 @@ def resolve_amp_dtype(cfg):
         )
         dtype = torch.float16
     return dtype
+
+
+def resolve_backbone_dtype(cfg):
+    """Dtype of the frozen PixelDiT weights and of its forward pass.
+
+    MODEL.PIXELDIT.PRECISION:
+      "auto"    - the autocast dtype when that is bfloat16 (what PixelDiT was trained
+                  in), float32 otherwise. float16 has bf16's precision but not its
+                  range (max 65504 vs 3.4e38), so a network trained in bf16 can
+                  overflow to inf/NaN in it; float32 is the safe substitute.
+      "float32" - always float32.
+      "amp"     - always the autocast dtype, float16 included (least memory). The
+                  model raises if the features come out non-finite.
+    """
+    name = cfg.MODEL.PIXELDIT.PRECISION.lower()
+    if name not in ("auto", "amp", "float32", "fp32"):
+        raise ValueError(
+            f"MODEL.PIXELDIT.PRECISION must be 'auto', 'float32' or 'amp', got {name!r}"
+        )
+    amp_dtype = resolve_amp_dtype(cfg)
+    if amp_dtype is None or name in ("float32", "fp32"):
+        return torch.float32
+    if name == "auto" and amp_dtype == torch.float16:
+        return torch.float32
+    return amp_dtype

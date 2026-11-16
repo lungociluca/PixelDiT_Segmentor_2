@@ -23,6 +23,7 @@ from san.config import add_san_config
 from san.model.criterion import SetCriterion
 from san.model.matcher import HungarianMatcher
 from san.model.side_adapter import build_side_adapter_network
+from san.utils.amp import resolve_amp_dtype
 from t2i.pixdit_core.pixeldit_t2i import PixDiT_T2I
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -79,7 +80,8 @@ def check_side_adapter():
 
     net.train()
     use_amp = device == "cuda"
-    with torch.autocast(device, dtype=torch.bfloat16, enabled=use_amp):
+    amp_dtype = resolve_amp_dtype(cfg) if use_amp else None  # fp16 on pre-Ampere GPUs
+    with torch.autocast(device, dtype=amp_dtype, enabled=use_amp):
         mask_preds, logits = net(image, feats)
     n_ds = len(cfg.MODEL.SIDE_ADAPTER.DEEP_SUPERVISION_IDXS)
     Q = cfg.MODEL.SIDE_ADAPTER.NUM_QUERIES

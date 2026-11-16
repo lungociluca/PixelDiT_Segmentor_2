@@ -271,7 +271,19 @@ class PixDiT_T2I(nn.Module):
             raise ValueError("Text embedding y must be [B, L, D]")
         Ltxt = min(y.shape[1], self.txt_max_length)  # same as upstream: keep all 300 tokens
         y = y[:, :Ltxt, :]
-        y_emb = self.y_embedder(y.to(local_config.device, dtype=x.dtype)).view(1, Ltxt, self.hidden_size).expand((B, -1, -1))
+        # Project the raw text-encoder states in fp32. Their magnitude is large
+        # (hence the RMSNorm right after the projection) and a 2304-term dot product
+        # of them overflows float16; after the norm the embedding is O(1) and can go
+        # back to the model dtype.
+        with torch.autocast(x.device.type, enabled=False):
+            proj = self.y_embedder.proj
+            y_emb = F.linear(
+                y.to(x.device, dtype=torch.float32),
+                proj.weight.float(),
+                proj.bias.float() if proj.bias is not None else None,
+            )
+            y_emb = self.y_embedder.norm(y_emb)
+        y_emb = y_emb.to(x.dtype).view(1, Ltxt, self.hidden_size).expand((B, -1, -1))
         y_emb = y_emb + self.y_pos_embedding[:, :Ltxt, :].to(y_emb.dtype)
 
         condition = torch.nn.functional.silu(t_emb)

@@ -24,11 +24,13 @@ class DPM_Solver_Wrapper(DPM_Solver):
         return_intermediate=False,
         flow_shift=1.0,
     ):
-        t = torch.tensor(local_config.timestep, device=local_config.device, dtype=torch.bfloat16)
+        t = torch.tensor(local_config.timestep, device=local_config.device, dtype=torch.float32)
         return self.model_fn(x, t) 
 
     def segment(self, x, segment_data):
-        t = torch.tensor(local_config.timestep, device=local_config.device, dtype=torch.bfloat16)
+        # fp32: the model casts the timestep to its own dtype (it used to be forced
+        # to bfloat16 here, whatever dtype the model ran in).
+        t = torch.tensor(local_config.timestep, device=local_config.device, dtype=torch.float32)
         return self.model(x, t, segment_data=segment_data) 
 
     # def precompute_language_embs_wrapper(self):

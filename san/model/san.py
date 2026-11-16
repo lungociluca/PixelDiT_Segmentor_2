@@ -19,7 +19,7 @@ import json
 from .criterion import SetCriterion
 from .matcher import HungarianMatcher
 from .side_adapter import build_side_adapter_network
-from ..utils.amp import resolve_amp_dtype
+from ..utils.amp import resolve_amp_dtype, resolve_backbone_dtype
 
 
 from t2i.diffusion.model.builder import build_model, get_tokenizer_and_text_encoder
@@ -166,6 +166,7 @@ class SAN(nn.Module):
         test_dataset_names: List[str],
         sem_seg_postprocess_before_inference: bool = False,
         amp_dtype: Optional[torch.dtype] = None,
+        backbone_dtype: torch.dtype = torch.float32,
         oracle_classes: bool = False,
         oracle_assignment: str = "max_iou",
         oracle_mask_threshold: float = 0.5,
@@ -221,16 +222,23 @@ class SAN(nn.Module):
         del self.tokenizer
         del self.text_encoder
 
-        # Store the frozen PixelDiT weights in the autocast dtype. Under fp32 weights,
-        # autocast keeps a half-precision copy of every weight during the forward pass,
-        # so this roughly removes 1.5x the backbone size from GPU memory. Any text
-        # embeddings that need fp32 should be computed above, before this cast.
+        # amp_dtype: autocast dtype of the trainable side adapter (None = fp32).
+        # backbone_dtype: dtype the frozen PixelDiT is stored and run in. The two
+        # differ when autocast is float16: PixelDiT was trained in bf16, and float16
+        # does not have bf16's range, so the backbone then stays in fp32 (see
+        # san.utils.amp.resolve_backbone_dtype). Storing the weights directly in a
+        # half dtype (rather than fp32 + autocast) avoids keeping two copies of them.
         self.amp_dtype = amp_dtype
-        if amp_dtype is not None:
+        self.backbone_dtype = backbone_dtype
+        if backbone_dtype != torch.float32:
             for p in self.model.parameters():
                 if not p.requires_grad:
-                    p.data = p.data.to(amp_dtype)
+                    p.data = p.data.to(backbone_dtype)
             torch.cuda.empty_cache()
+        get_root_logger().info(
+            f"Precision: side adapter autocast={amp_dtype or torch.float32}, "
+            f"frozen PixelDiT={backbone_dtype}"
+        )
 
         # Trainable side adapter (kept in fp32; autocast handles the compute dtype).
         hidden_size = self.model.core.hidden_size
@@ -289,6 +297,7 @@ class SAN(nn.Module):
             "test_dataset_names": list(cfg.DATASETS.TEST),
             "sem_seg_postprocess_before_inference": cfg.MODEL.SAN.SEM_SEG_POSTPROCESS_BEFORE_INFERENCE,
             "amp_dtype": resolve_amp_dtype(cfg),
+            "backbone_dtype": resolve_backbone_dtype(cfg),
             "oracle_classes": cfg.MODEL.SAN.ORACLE_CLASSES.ENABLED,
             "oracle_assignment": cfg.MODEL.SAN.ORACLE_CLASSES.ASSIGNMENT,
             "oracle_mask_threshold": cfg.MODEL.SAN.ORACLE_CLASSES.MASK_THRESHOLD,
@@ -357,9 +366,25 @@ class SAN(nn.Module):
         """
         segment_data = {"feature_layers": self.feature_layers}
         # The backbone is frozen and nothing before it is trained, so no autograd
-        # graph is needed through it, even during training.
-        with torch.no_grad():
+        # graph is needed through it, even during training. It runs in its own
+        # dtype: this overrides the surrounding autocast (and switches it off for an
+        # fp32 backbone, whose weights must not be cast down to the side adapter's
+        # float16).
+        half_backbone = self.backbone_dtype != torch.float32
+        with torch.no_grad(), torch.autocast(
+            image_tensor.device.type,
+            dtype=self.backbone_dtype if half_backbone else None,
+            enabled=half_backbone,
+        ):
             self.run_diffusion_model(image_tensor, segment_data)
+
+        for k, v in segment_data["features"].items():
+            if not torch.isfinite(v).all():
+                raise FloatingPointError(
+                    f"PixelDiT layer {k} features contain inf/NaN with the backbone in "
+                    f"{self.backbone_dtype}. Set MODEL.PIXELDIT.PRECISION to 'auto' or "
+                    "'float32' (float16 overflows where bfloat16 does not)."
+                )
 
         h, w = segment_data["hw"]
         # {layer: (B, h*w, hidden)} -> {layer: (B, hidden, h, w)}. fp32 so the
@@ -403,7 +428,10 @@ class SAN(nn.Module):
                 ],
             }
 
-            losses = self.criterion(outputs, targets)
+            # Matching and losses in fp32, whatever the trainer's autocast dtype:
+            # they sum over thousands of points and take logs of probabilities.
+            with torch.autocast(images_tensor.device.type, enabled=False):
+                losses = self.criterion(outputs, targets)
 
             for k in list(losses.keys()):
                 if k in self.criterion.weight_dict:
