@@ -192,6 +192,9 @@ class SAN(nn.Module):
         concept_init_logit_scale: float = 20.0,
         concept_label_smoothing: float = 0.1,
         concept_holdout_classes: Optional[List[str]] = None,
+        concept_train_mode: str = "gt_masks",
+        concept_loss_weight: float = 2.0,
+        concept_detach_masks: bool = True,
     ):
         super().__init__()
         self.size_divisibility = 16
@@ -236,6 +239,13 @@ class SAN(nn.Module):
         self.concept_cosine = concept_cosine and concept_lora
         self.concept_label_smoothing = concept_label_smoothing
         self.concept_adapter = None
+        if concept_train_mode not in ("gt_masks", "joint"):
+            raise ValueError(
+                f"MODEL.CONCEPT.LORA.TRAIN_MODE must be 'gt_masks' or 'joint', got {concept_train_mode!r}"
+            )
+        self.concept_joint = concept_lora and concept_train_mode == "joint"
+        self.concept_loss_weight = concept_loss_weight
+        self.concept_detach_masks = concept_detach_masks
 
         self.class_agnostic = class_agnostic
         if class_agnostic and not (oracle_classes or concept_enabled):
@@ -360,12 +370,14 @@ class SAN(nn.Module):
         )
 
         if concept_lora:
-            # Trainable concept path. Training then optimises only the concept
-            # classifier (see concept_train_forward); the side adapter is frozen.
+            # Trainable concept path. With TRAIN_MODE "gt_masks", training optimises
+            # only the concept classifier (see concept_train_forward) and the side
+            # adapter is frozen; with "joint" both are trained.
             self.concept_adapter = ConceptLoRA(
                 hidden_size, self.concept_layers[-1], rank=concept_lora_rank, alpha=concept_lora_alpha
             )
-            self.side_adapter_network.requires_grad_(False)
+            if not self.concept_joint:
+                self.side_adapter_network.requires_grad_(False)
 
     @classmethod
     def from_config(cls, cfg):
@@ -442,6 +454,9 @@ class SAN(nn.Module):
             "concept_init_logit_scale": cfg.MODEL.CONCEPT.LORA.INIT_LOGIT_SCALE,
             "concept_label_smoothing": cfg.MODEL.CONCEPT.LORA.LABEL_SMOOTHING,
             "concept_holdout_classes": list(cfg.MODEL.CONCEPT.LORA.HOLDOUT_CLASSES),
+            "concept_train_mode": cfg.MODEL.CONCEPT.LORA.TRAIN_MODE,
+            "concept_loss_weight": cfg.MODEL.CONCEPT.LORA.LOSS_WEIGHT,
+            "concept_detach_masks": cfg.MODEL.CONCEPT.LORA.DETACH_MASKS,
         }
     
     def embed_condition(self, prompts, with_chi_window=False):
@@ -649,7 +664,7 @@ class SAN(nn.Module):
         dataset_name = self._dataset_name(batched_inputs)
         if self.concept_gt_masks and not self.training:
             return self.gt_mask_inference(batched_inputs, images, dataset_name)
-        if self.concept_lora and self.training:
+        if self.concept_lora and self.training and not self.concept_joint:
             return self.concept_train_forward(batched_inputs, images, dataset_name)
         mask_logits, mask_preds, concept_out = self.call_model(images_tensor, dataset_name)
         if self.training:
@@ -683,6 +698,10 @@ class SAN(nn.Module):
                 else:
                     # remove this loss if not specified in `weight_dict`
                     losses.pop(k)
+            if self.concept_joint and targets is not None:
+                losses["loss_concept_cls"] = self.concept_loss_weight * self.concept_joint_loss(
+                    images_tensor, mask_preds[-1], gt_instances, self.criterion.last_indices, dataset_name
+                )
             return losses
         else:
             mask_preds = mask_preds[-1]
@@ -769,6 +788,54 @@ class SAN(nn.Module):
                     )
                 processed_results[-1]["sem_seg"] = r
             return processed_results
+
+    def concept_joint_loss(self, images_tensor, mask_preds, gt_instances, indices, dataset_name):
+        """Cross-entropy of the concept classifier on the predicted masks that the
+        Hungarian matcher assigned to ground-truth segments (TRAIN_MODE "joint").
+
+        mask_preds: (B, Q, hm, wm) mask logits of the last side-adapter output.
+        indices:    per image, (query indices, GT segment indices) from the matcher.
+        """
+        keep, remap = self.concept_train_vocab.get(dataset_name, (None, None))
+        with torch.autocast(
+            "cuda", dtype=self.amp_dtype or torch.float32, enabled=self.amp_dtype is not None
+        ):
+            concept_out = self.concept_pass(images_tensor, dataset_name, train=True, keep=keep)
+        h, w = concept_out["hw"]
+        with torch.autocast(images_tensor.device.type, enabled=False):
+            pixel_logits = self.concept_classifier.pixel_scores(concept_out["scores"])  # (B, h*w, C)
+            masks = mask_preds.float()
+            if self.concept_detach_masks:
+                masks = masks.detach()
+            if tuple(masks.shape[-2:]) != (h, w):
+                masks = F.interpolate(masks, size=(h, w), mode="bilinear", align_corners=False)
+            masks = masks.sigmoid().flatten(2)  # (B, Q, h*w)
+            logits, targets = [], []
+            for i, (src, tgt) in enumerate(indices):
+                classes = gt_instances[i].gt_classes[tgt.to(local_config.device)]
+                src = src.to(local_config.device)
+                if remap is not None:
+                    classes = remap[classes]
+                    src, classes = src[classes >= 0], classes[classes >= 0]
+                if classes.numel() == 0:
+                    continue
+                logits.append(self.concept_classifier.pool_logits(pixel_logits[i], masks[i, src]))
+                targets.append(classes)
+            if not logits:
+                return pixel_logits.sum() * 0.0
+            logits, targets = torch.cat(logits), torch.cat(targets)
+            loss = F.cross_entropy(logits, targets, label_smoothing=self.concept_label_smoothing)
+        try:
+            from detectron2.utils.events import get_event_storage
+
+            storage = get_event_storage()
+            storage.put_scalar(
+                "concept_cls_acc", (logits.argmax(-1) == targets).float().mean().item()
+            )
+            storage.put_scalar("concept_logit_scale", self.concept_classifier.logit_scale.exp().item())
+        except AssertionError:
+            pass  # no event storage outside a trainer
+        return loss
 
     @torch.no_grad()
     def gt_mask_inference(self, batched_inputs, images, dataset_name):

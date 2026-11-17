@@ -141,6 +141,20 @@ def add_san_config(cfg):
     # concepts are not in the training vocabulary), to measure generalisation to
     # unseen classes: evaluate on the same dataset and compare their per-class IoU.
     cfg.MODEL.CONCEPT.LORA.HOLDOUT_CLASSES = []
+    # "gt_masks": train only the concept classifier, on ground-truth segments (the
+    #             side adapter is frozen and not run).
+    # "joint":    train the side adapter (masks + objectness, as without concepts)
+    #             and the concept classifier together: every predicted mask that
+    #             the Hungarian matcher assigns to a ground-truth segment is
+    #             classified with the concept scores pooled over that predicted
+    #             mask; cross-entropy against the segment's class.
+    cfg.MODEL.CONCEPT.LORA.TRAIN_MODE = "gt_masks"
+    # Weight of that cross-entropy ("joint" only; "gt_masks" uses 1).
+    cfg.MODEL.CONCEPT.LORA.LOSS_WEIGHT = 2.0
+    # "joint" only: stop the classification loss from flowing into the masks.
+    # False lets the classifier reshape the masks (end-to-end, as in SAN), which
+    # can also shrink them to their most discriminative parts.
+    cfg.MODEL.CONCEPT.LORA.DETACH_MASKS = True
     # Diagnostic: ignore the masks and output the per-patch class probabilities as
     # the segmentation, to measure the concept scores on their own.
     cfg.MODEL.CONCEPT.PIXEL_BASELINE = False

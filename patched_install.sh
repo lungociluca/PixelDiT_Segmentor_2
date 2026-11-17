@@ -38,9 +38,26 @@ EOF
 # 4. Build tools. setuptools<70 keeps pkg_resources, which mmcv's setup.py needs.
 pip install 'numpy<2' 'setuptools<70' wheel ninja
 
-# 5. detectron2 from source, against the installed torch
-#    (needs nvcc matching torch.version.cuda; if missing:
-#     conda install -c nvidia cuda-toolkit=12.1 -y)
+# 5. detectron2 from source, against the installed torch.
+#    torch's extension builder refuses an nvcc whose CUDA major version differs
+#    from torch.version.cuda (12.1), so a system CUDA 13.x nvcc cannot be used.
+#    Install a CUDA 12.1 toolkit inside the env and point the build at it.
+conda install -c "nvidia/label/cuda-12.1.1" cuda-toolkit -y
+export CUDA_HOME="$CONDA_PREFIX"
+export PATH="$CUDA_HOME/bin:$PATH"
+
+#    CUDA 12.1's nvcc only accepts gcc <= 12; use a conda gcc 11 if the system one is newer.
+GCC_MAJOR="$(gcc -dumpversion 2>/dev/null | cut -d. -f1 || echo 0)"
+if [[ "$GCC_MAJOR" -eq 0 || "$GCC_MAJOR" -gt 12 ]]; then
+  conda install -c conda-forge gcc_linux-64=11 gxx_linux-64=11 -y
+  export CC="$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-gcc"
+  export CXX="$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-g++"
+fi
+
+#    Build CUDA ops for the RTX 4090 (Ada, sm_89) even if no GPU is visible at build time.
+export FORCE_CUDA=1
+export TORCH_CUDA_ARCH_LIST="8.9"
+nvcc --version | tail -2
 pip install --no-build-isolation 'git+https://github.com/facebookresearch/detectron2.git'
 
 # 6. SAN requirements, with the torch-1.x-era pins replaced

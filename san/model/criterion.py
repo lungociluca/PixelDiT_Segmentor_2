@@ -232,6 +232,9 @@ class SetCriterion(nn.Module):
 
         # Retrieve the matching between the outputs of the last layer and the targets
         indices = self.matcher(outputs_without_aux, targets)
+        # Kept for losses computed outside the criterion (concept classification
+        # of the matched predicted masks).
+        self.last_indices = indices
 
         # Compute the average number of target boxes accross all nodes, for normalization purposes
         num_masks = sum(len(t["labels"]) for t in targets)

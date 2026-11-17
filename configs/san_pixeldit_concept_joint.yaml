@@ -1,0 +1,13 @@
+# Joint training of the side adapter (class-agnostic masks + objectness) and the
+# concept classifier (LoRA on the concept path of PixelDiT). The classifier is
+# trained on the predicted masks matched to ground-truth segments, and evaluation
+# classifies the side adapter's masks (no ground truth at inference).
+#   train: python train_net.py --config-file configs/san_pixeldit_concept_joint.yaml --num-gpus 1 OUTPUT_DIR output_joint
+_BASE_: san_pixeldit_concept_lora.yaml
+MODEL:
+  CONCEPT:
+    GT_MASKS: False
+    LORA:
+      TRAIN_MODE: "joint"
+      LOSS_WEIGHT: 2.0
+      DETACH_MASKS: True

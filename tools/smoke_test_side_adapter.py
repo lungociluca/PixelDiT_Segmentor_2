@@ -122,6 +122,10 @@ def check_side_adapter():
         ],
     }
     losses = criterion(outputs, targets)
+    # Matching of the final output is kept for the joint concept-classification loss.
+    assert len(criterion.last_indices) == B
+    for (src, tgt), tg in zip(criterion.last_indices, targets):
+        assert len(src) == len(tgt) == len(tg["labels"]), (src, tgt)
     total = sum(losses[k] * weight_dict[k] for k in losses if k in weight_dict)
     assert torch.isfinite(total), losses
     total.backward()
