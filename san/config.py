@@ -84,6 +84,67 @@ def add_san_config(cfg):
     # model has learned are empty.
     cfg.MODEL.SAN.ORACLE_CLASSES.WEIGHT_BY_OBJECTNESS = True
 
+    # Open-vocabulary mask classification from PixelDiT concept attention
+    # (ConceptAttention, arXiv:2502.04320). Inference only and training-free: every
+    # class name is a concept token run through the frozen PixelDiT's text stream;
+    # each mask gets the classes of the image tokens it covers. Mutually exclusive
+    # with ORACLE_CLASSES.ENABLED.
+    cfg.MODEL.CONCEPT = CN()
+    cfg.MODEL.CONCEPT.ENABLED = False
+    # PixelDiT blocks (1-based) whose attention outputs are compared; their scores
+    # are averaged. Blocks up to the deepest one are built and, at inference, run.
+    cfg.MODEL.CONCEPT.LAYERS = [1, 2, 3, 4]
+    # Prompt each class name is encoded in; only the name's tokens are pooled.
+    cfg.MODEL.CONCEPT.TEMPLATE = "A picture of a {target}"
+    # "mean": mean of the name's tokens. "last": its last token.
+    cfg.MODEL.CONCEPT.POOL = "mean"
+    # Divides the similarities before the softmax over classes.
+    cfg.MODEL.CONCEPT.TEMPERATURE = 1.0
+    # True: softmax over classes per patch and layer, then average over the mask
+    # (as in the paper). False: average raw similarities over the mask, then softmax.
+    cfg.MODEL.CONCEPT.PIXEL_SOFTMAX = True
+    # Pool over the thresholded (0.5) mask instead of the soft sigmoid mask.
+    cfg.MODEL.CONCEPT.BINARIZE_MASKS = False
+    # Scale each mask's class probabilities by its predicted objectness.
+    cfg.MODEL.CONCEPT.WEIGHT_BY_OBJECTNESS = True
+    # Flow time of the PixelDiT pass that scores the concepts, = fraction of noise:
+    # the input is (1 - t) * image + t * gaussian noise. With learned masks this is
+    # a second backbone pass (the side adapter keeps its clean-image pass). <= 0:
+    # no noise, reuse the side adapter's pass (t2i.config.timestep).
+    cfg.MODEL.CONCEPT.TIMESTEP = 0.4
+    # Seed of that noise; the same noise is used for every image, so evaluation
+    # is reproducible.
+    cfg.MODEL.CONCEPT.NOISE_SEED = 0
+    # Classify the ground-truth segments instead of the side adapter's masks (one
+    # mask per GT class present in the image). The side adapter is not run, so no
+    # trained checkpoint is needed: this isolates mask classification. pACC is then
+    # the area-weighted accuracy of the classifier; the per-segment top-1 accuracy
+    # is logged during evaluation.
+    cfg.MODEL.CONCEPT.GT_MASKS = False
+    # Trained variant: low-rank adapters on the PixelDiT text-stream attention
+    # weights, applied to the concept tokens only, plus learned layer weights and
+    # a learned logit scale. No per-class parameters, so new class names work
+    # without retraining. When enabled, *training* trains only this classifier:
+    # ground-truth segments are classified with a cross-entropy over the class
+    # names, the side adapter is frozen and not run. Evaluation needs the same
+    # setting to load the trained weights.
+    cfg.MODEL.CONCEPT.LORA = CN()
+    cfg.MODEL.CONCEPT.LORA.ENABLED = False
+    cfg.MODEL.CONCEPT.LORA.RANK = 16
+    cfg.MODEL.CONCEPT.LORA.ALPHA = 16.0
+    # Cosine instead of dot-product similarity between image and concept outputs
+    # (bounded logits; the learned scale below sets their range).
+    cfg.MODEL.CONCEPT.LORA.COSINE = True
+    cfg.MODEL.CONCEPT.LORA.INIT_LOGIT_SCALE = 20.0
+    cfg.MODEL.CONCEPT.LORA.LABEL_SMOOTHING = 0.1
+    # Class names left out of training (their segments are skipped and their
+    # concepts are not in the training vocabulary), to measure generalisation to
+    # unseen classes: evaluate on the same dataset and compare their per-class IoU.
+    cfg.MODEL.CONCEPT.LORA.HOLDOUT_CLASSES = []
+    # Diagnostic: ignore the masks and output the per-patch class probabilities as
+    # the segmentation, to measure the concept scores on their own.
+    cfg.MODEL.CONCEPT.PIXEL_BASELINE = False
+
     # PixelDiT backbone
     cfg.MODEL.PIXELDIT = CN()
     # PixelDiT layers whose image tokens are passed to the side adapter:

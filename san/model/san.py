@@ -16,6 +16,7 @@ import pyrallis
 from argparse import Namespace
 import json
 
+from .concept_classifier import ConceptLoRA, ConceptMaskClassifier, encode_concepts
 from .criterion import SetCriterion
 from .matcher import HungarianMatcher
 from .side_adapter import build_side_adapter_network
@@ -172,6 +173,25 @@ class SAN(nn.Module):
         oracle_mask_threshold: float = 0.5,
         oracle_min_score: float = 0.0,
         oracle_weight_by_objectness: bool = True,
+        concept_enabled: bool = False,
+        concept_layers: Optional[List[int]] = None,
+        concept_template: str = "A picture of a {target}",
+        concept_pool: str = "mean",
+        concept_temperature: float = 1.0,
+        concept_pixel_softmax: bool = True,
+        concept_binarize_masks: bool = False,
+        concept_weight_by_objectness: bool = True,
+        concept_pixel_baseline: bool = False,
+        concept_timestep: float = 0.4,
+        concept_noise_seed: int = 0,
+        concept_gt_masks: bool = False,
+        concept_lora: bool = False,
+        concept_lora_rank: int = 16,
+        concept_lora_alpha: float = 16.0,
+        concept_cosine: bool = True,
+        concept_init_logit_scale: float = 20.0,
+        concept_label_smoothing: float = 0.1,
+        concept_holdout_classes: Optional[List[str]] = None,
     ):
         super().__init__()
         self.size_divisibility = 16
@@ -185,11 +205,44 @@ class SAN(nn.Module):
         self.oracle_min_score = oracle_min_score
         self.oracle_weight_by_objectness = oracle_weight_by_objectness
 
+        # Concept-attention mask classification (inference only, training-free).
+        self.concept_enabled = concept_enabled
+        self.concept_layers = sorted(set(int(k) for k in (concept_layers or [])))
+        self.concept_weight_by_objectness = concept_weight_by_objectness
+        self.concept_pixel_baseline = concept_pixel_baseline
+        if concept_enabled and oracle_classes:
+            raise ValueError(
+                "MODEL.CONCEPT.ENABLED and MODEL.SAN.ORACLE_CLASSES.ENABLED both label the "
+                "masks at inference; enable only one of them."
+            )
+        if concept_enabled and (not self.concept_layers or self.concept_layers[0] < 1):
+            raise ValueError(
+                f"MODEL.CONCEPT.LAYERS must list PixelDiT blocks >= 1, got {concept_layers}"
+            )
+        if concept_pixel_baseline and not concept_enabled:
+            raise ValueError("MODEL.CONCEPT.PIXEL_BASELINE needs MODEL.CONCEPT.ENABLED.")
+        if concept_gt_masks and not concept_enabled:
+            raise ValueError("MODEL.CONCEPT.GT_MASKS needs MODEL.CONCEPT.ENABLED.")
+        if concept_timestep >= 1:
+            raise ValueError(f"MODEL.CONCEPT.TIMESTEP must be < 1, got {concept_timestep}")
+        self.concept_timestep = float(concept_timestep)
+        self.concept_noise_seed = int(concept_noise_seed)
+        self.concept_gt_masks = concept_gt_masks
+        # dataset_name -> [correctly classified GT segments, GT segments]
+        self.concept_gt_stats = {}
+        if concept_lora and not concept_enabled:
+            raise ValueError("MODEL.CONCEPT.LORA.ENABLED needs MODEL.CONCEPT.ENABLED.")
+        self.concept_lora = concept_lora
+        self.concept_cosine = concept_cosine and concept_lora
+        self.concept_label_smoothing = concept_label_smoothing
+        self.concept_adapter = None
+
         self.class_agnostic = class_agnostic
-        if class_agnostic and not oracle_classes:
+        if class_agnostic and not (oracle_classes or concept_enabled):
             raise ValueError(
                 "MODEL.SAN.CLASS_AGNOSTIC predicts no classes, so it needs "
-                "MODEL.SAN.ORACLE_CLASSES.ENABLED to label the masks at inference."
+                "MODEL.CONCEPT.ENABLED or MODEL.SAN.ORACLE_CLASSES.ENABLED to label the "
+                "masks at inference."
             )
 
         # PixelDiT layers fed to the side adapter (0 = patch embedding, k = block k).
@@ -197,13 +250,22 @@ class SAN(nn.Module):
         self.feature_layers = sorted(set(int(k) for k in feature_layers))
         if not self.feature_layers or self.feature_layers[0] < 0:
             raise ValueError(f"MODEL.PIXELDIT.FEATURE_LAYERS must be non-negative, got {feature_layers}")
-        local_config.layer_count = self.feature_layers[-1]
+        # Blocks built = deepest layer needed by the side adapter or by the concept
+        # classifier. Training only runs the side adapter's layers.
+        local_config.layer_count = max(
+            self.feature_layers[-1], self.concept_layers[-1] if concept_enabled else 0
+        )
 
         self.model, self.tokenizer, self.text_encoder = get_model()
         num_blocks = len(self.model.core.patch_blocks)
         if self.feature_layers[-1] > num_blocks:
             raise ValueError(
                 f"MODEL.PIXELDIT.FEATURE_LAYERS {self.feature_layers} goes deeper than the "
+                f"{num_blocks} PixelDiT patch blocks."
+            )
+        if concept_enabled and self.concept_layers[-1] > num_blocks:
+            raise ValueError(
+                f"MODEL.CONCEPT.LAYERS {self.concept_layers} goes deeper than the "
                 f"{num_blocks} PixelDiT patch blocks."
             )
 
@@ -218,6 +280,56 @@ class SAN(nn.Module):
         self.class_labels = {}   # dataset_name -> List[str]
         for name in dict.fromkeys(list(train_dataset_names) + list(test_dataset_names)):
             self.class_labels[name] = get_dataset_labels(name)
+
+        # One concept vector per class name, per dataset (needs the text encoder,
+        # so computed before it is dropped). dataset_name -> (K, txt_embed_dim).
+        self.concept_embs = {}
+        self.concept_position = 0
+        self.concept_classifier = None
+        if concept_enabled:
+            self.concept_classifier = ConceptMaskClassifier(
+                temperature=concept_temperature,
+                pixel_softmax=concept_pixel_softmax,
+                binarize_masks=concept_binarize_masks,
+                learned=concept_lora,
+                num_layers=len(self.concept_layers),
+                init_logit_scale=concept_init_logit_scale,
+            )
+            for name, labels in self.class_labels.items():
+                embs, self.concept_position = encode_concepts(
+                    self.tokenizer,
+                    self.text_encoder,
+                    labels,
+                    template=concept_template,
+                    pool=concept_pool,
+                    device=local_config.device,
+                )
+                self.concept_embs[name] = embs
+            get_root_logger().info(
+                f"Concept classifier: PixelDiT layers {self.concept_layers}, "
+                f"{ {k: v.shape[0] for k, v in self.concept_embs.items()} } concepts, "
+                f"text position {self.concept_position}"
+            )
+
+        # Training vocabulary without the held-out classes:
+        # dataset_name -> (indices of the kept classes, class id -> new id or -1).
+        self.concept_train_vocab = {}
+        holdout = set(concept_holdout_classes or [])
+        if concept_lora and holdout:
+            for name in train_dataset_names:
+                labels = self.class_labels[name]
+                unknown = holdout - set(labels)
+                if unknown:
+                    raise ValueError(
+                        f"MODEL.CONCEPT.LORA.HOLDOUT_CLASSES {sorted(unknown)} are not classes of '{name}'."
+                    )
+                keep = torch.tensor(
+                    [i for i, l in enumerate(labels) if l not in holdout],
+                    dtype=torch.long, device=local_config.device,
+                )
+                remap = torch.full((len(labels),), -1, dtype=torch.long, device=local_config.device)
+                remap[keep] = torch.arange(keep.numel(), device=local_config.device)
+                self.concept_train_vocab[name] = (keep, remap)
 
         del self.tokenizer
         del self.text_encoder
@@ -246,6 +358,14 @@ class SAN(nn.Module):
             side_adapter_cfg,
             {k: ShapeSpec(channels=hidden_size) for k in self.feature_layers},
         )
+
+        if concept_lora:
+            # Trainable concept path. Training then optimises only the concept
+            # classifier (see concept_train_forward); the side adapter is frozen.
+            self.concept_adapter = ConceptLoRA(
+                hidden_size, self.concept_layers[-1], rank=concept_lora_rank, alpha=concept_lora_alpha
+            )
+            self.side_adapter_network.requires_grad_(False)
 
     @classmethod
     def from_config(cls, cfg):
@@ -303,6 +423,25 @@ class SAN(nn.Module):
             "oracle_mask_threshold": cfg.MODEL.SAN.ORACLE_CLASSES.MASK_THRESHOLD,
             "oracle_min_score": cfg.MODEL.SAN.ORACLE_CLASSES.MIN_SCORE,
             "oracle_weight_by_objectness": cfg.MODEL.SAN.ORACLE_CLASSES.WEIGHT_BY_OBJECTNESS,
+            "concept_enabled": cfg.MODEL.CONCEPT.ENABLED,
+            "concept_layers": list(cfg.MODEL.CONCEPT.LAYERS),
+            "concept_template": cfg.MODEL.CONCEPT.TEMPLATE,
+            "concept_pool": cfg.MODEL.CONCEPT.POOL,
+            "concept_temperature": cfg.MODEL.CONCEPT.TEMPERATURE,
+            "concept_pixel_softmax": cfg.MODEL.CONCEPT.PIXEL_SOFTMAX,
+            "concept_binarize_masks": cfg.MODEL.CONCEPT.BINARIZE_MASKS,
+            "concept_weight_by_objectness": cfg.MODEL.CONCEPT.WEIGHT_BY_OBJECTNESS,
+            "concept_pixel_baseline": cfg.MODEL.CONCEPT.PIXEL_BASELINE,
+            "concept_timestep": cfg.MODEL.CONCEPT.TIMESTEP,
+            "concept_noise_seed": cfg.MODEL.CONCEPT.NOISE_SEED,
+            "concept_gt_masks": cfg.MODEL.CONCEPT.GT_MASKS,
+            "concept_lora": cfg.MODEL.CONCEPT.LORA.ENABLED,
+            "concept_lora_rank": cfg.MODEL.CONCEPT.LORA.RANK,
+            "concept_lora_alpha": cfg.MODEL.CONCEPT.LORA.ALPHA,
+            "concept_cosine": cfg.MODEL.CONCEPT.LORA.COSINE,
+            "concept_init_logit_scale": cfg.MODEL.CONCEPT.LORA.INIT_LOGIT_SCALE,
+            "concept_label_smoothing": cfg.MODEL.CONCEPT.LORA.LABEL_SMOOTHING,
+            "concept_holdout_classes": list(cfg.MODEL.CONCEPT.LORA.HOLDOUT_CLASSES),
         }
     
     def embed_condition(self, prompts, with_chi_window=False):
@@ -319,9 +458,10 @@ class SAN(nn.Module):
         emb_masks = caption_token.attention_mask[:, select_index]
         return caption_embs, emb_masks, tokens_count
     
-    def run_diffusion_model(self, image, segment_data):
-        """One forward pass of the frozen PixelDiT on the clean image at the fixed
-        timestep local_config.timestep, conditioned on the default prompt. Fills
+    def run_diffusion_model(self, image, segment_data, timestep=None):
+        """One forward pass of the frozen PixelDiT on `image` at flow time `timestep`
+        (default local_config.timestep, for the clean image), conditioned on the
+        default prompt. `image` must already carry the noise of that timestep. Fills
         segment_data["hw"] and segment_data["features"] (see PixDiT_T2I.forward)."""
         emb = self.default_emb
         emb_mask = self.default_emb_mask
@@ -341,8 +481,105 @@ class SAN(nn.Module):
 
         samples = dpm_solver.segment(
             image,
-            segment_data
+            segment_data,
+            timestep=timestep,
         )
+
+    def _run_backbone(self, image_tensor, segment_data, timestep=None, grad=False):
+        # The backbone is frozen and nothing before it is trained, so no autograd
+        # graph is needed through it, even during training. The exception is
+        # grad=True, for training the concept adapter: the graph then only covers
+        # the concept tokens, the image stream has nothing that requires grad.
+        # The backbone runs in its own dtype: this overrides the surrounding
+        # autocast (and switches it off for an fp32 backbone, whose weights must
+        # not be cast down to the side adapter's float16).
+        half_backbone = self.backbone_dtype != torch.float32
+        with torch.set_grad_enabled(grad), torch.autocast(
+            image_tensor.device.type,
+            dtype=self.backbone_dtype if half_backbone else None,
+            enabled=half_backbone,
+        ):
+            self.run_diffusion_model(image_tensor, segment_data, timestep)
+
+    def _concept_inputs(self, dataset_name, keep=None):
+        if dataset_name not in self.concept_embs:
+            raise KeyError(f"No concept embeddings for '{dataset_name}'.")
+        concepts = self.concept_embs[dataset_name]
+        return {
+            "concepts": concepts if keep is None else concepts[keep],
+            "concept_layers": self.concept_layers,
+            "concept_position": self.concept_position,
+            "concept_adapter": self.concept_adapter,
+            "concept_cosine": self.concept_cosine,
+        }
+
+    def concept_pass(self, image_tensor, dataset_name, train=False, keep=None):
+        """Backbone pass that only scores the class concepts, on the image noised
+        to MODEL.CONCEPT.TIMESTEP: x_t = (1 - t) * image + t * noise (the flow the
+        model was trained on). Returns {"scores": {layer: (B, h*w, C)}, "hw": (h, w)}.
+
+        train: fresh noise instead of the fixed evaluation noise, and gradients
+               flow into the concept adapter.
+        keep:  indices of the classes to use (default: the whole vocabulary)."""
+        t = self.concept_timestep
+        x = image_tensor
+        if t > 0:
+            g = None
+            if not train:
+                g = torch.Generator(device=image_tensor.device).manual_seed(self.concept_noise_seed)
+            noise = torch.randn(
+                image_tensor.shape, generator=g, device=image_tensor.device, dtype=image_tensor.dtype
+            )
+            x = (1.0 - t) * image_tensor + t * noise
+        segment_data = {"feature_layers": [], **self._concept_inputs(dataset_name, keep)}
+        self._run_backbone(x, segment_data, timestep=t if t > 0 else None, grad=train)
+        return {"scores": segment_data["concept_scores"], "hw": segment_data["hw"]}
+
+    def concept_train_forward(self, batched_inputs, images, dataset_name):
+        """Training step of the concept classifier (MODEL.CONCEPT.LORA.ENABLED):
+        every ground-truth segment is classified by pooling the concept scores
+        over its mask; cross-entropy over the (non held-out) class names."""
+        keep, remap = self.concept_train_vocab.get(dataset_name, (None, None))
+        with torch.autocast(
+            "cuda", dtype=self.amp_dtype or torch.float32, enabled=self.amp_dtype is not None
+        ):
+            concept_out = self.concept_pass(images.tensor, dataset_name, train=True, keep=keep)
+        h, w = concept_out["hw"]
+        H_pad, W_pad = images.tensor.shape[-2:]
+        with torch.autocast(images.tensor.device.type, enabled=False):
+            pixel_logits = self.concept_classifier.pixel_scores(concept_out["scores"])  # (B, h*w, C)
+            logits, targets = [], []
+            for i, x in enumerate(batched_inputs):
+                instances = x["instances"].to(local_config.device)
+                masks, classes = instances.gt_masks, instances.gt_classes
+                if remap is not None:
+                    classes = remap[classes]
+                    masks, classes = masks[classes >= 0], classes[classes >= 0]
+                if classes.numel() == 0:
+                    continue
+                padded = F.pad(
+                    masks.float(), (0, W_pad - masks.shape[-1], 0, H_pad - masks.shape[-2])
+                )
+                # Fraction of every PixelDiT patch covered by each segment.
+                weights = F.adaptive_avg_pool2d(padded[None], (h, w))[0].flatten(1)  # (S, h*w)
+                visible = weights.sum(-1) > 0
+                logits.append(self.concept_classifier.pool_logits(pixel_logits[i], weights[visible]))
+                targets.append(classes[visible])
+            if not logits or sum(t.numel() for t in targets) == 0:
+                return {"loss_concept_cls": pixel_logits.sum() * 0.0}
+            logits, targets = torch.cat(logits), torch.cat(targets)
+            loss = F.cross_entropy(logits, targets, label_smoothing=self.concept_label_smoothing)
+        try:
+            from detectron2.utils.events import get_event_storage
+
+            storage = get_event_storage()
+            storage.put_scalar(
+                "concept_cls_acc", (logits.argmax(-1) == targets).float().mean().item()
+            )
+            storage.put_scalar("concept_logit_scale", self.concept_classifier.logit_scale.exp().item())
+        except AssertionError:
+            pass  # no event storage outside a trainer
+        return {"loss_concept_cls": loss}
 
     def call_model(self, image_tensor, dataset_name):
         # Autocast here too (not only in the training loop) because evaluation runs
@@ -351,8 +588,8 @@ class SAN(nn.Module):
         with torch.autocast(
             "cuda", dtype=self.amp_dtype or torch.float32, enabled=self.amp_dtype is not None
         ):
-            mask_logits, mask_preds = self._call_model(image_tensor, dataset_name)
-        return [x.float() for x in mask_logits], [x.float() for x in mask_preds]
+            mask_logits, mask_preds, concept_out = self._call_model(image_tensor, dataset_name)
+        return [x.float() for x in mask_logits], [x.float() for x in mask_preds], concept_out
 
     def _call_model(self, image_tensor, dataset_name):
         """Run the frozen backbone and the side adapter.
@@ -363,20 +600,18 @@ class SAN(nn.Module):
           mask_logits: (B, Q, K + 1) class logits per mask, last column = no object
                        (K = 1 when MODEL.SAN.CLASS_AGNOSTIC)
           mask_preds:  (B, Q, h, w) mask logits on the patch grid
+        and, at inference with MODEL.CONCEPT.ENABLED, a dict (None otherwise):
+          "scores": {layer: (B, h*w, C)} image-token / class-concept similarities
+          "hw":     (h, w) PixelDiT patch grid
         """
         segment_data = {"feature_layers": self.feature_layers}
-        # The backbone is frozen and nothing before it is trained, so no autograd
-        # graph is needed through it, even during training. It runs in its own
-        # dtype: this overrides the surrounding autocast (and switches it off for an
-        # fp32 backbone, whose weights must not be cast down to the side adapter's
-        # float16).
-        half_backbone = self.backbone_dtype != torch.float32
-        with torch.no_grad(), torch.autocast(
-            image_tensor.device.type,
-            dtype=self.backbone_dtype if half_backbone else None,
-            enabled=half_backbone,
-        ):
-            self.run_diffusion_model(image_tensor, segment_data)
+        use_concepts = self.concept_enabled and not self.training
+        # Concepts share this (clean image) pass only when no noise is requested;
+        # otherwise they get their own noised pass below.
+        share_pass = use_concepts and self.concept_timestep <= 0
+        if share_pass:
+            segment_data.update(self._concept_inputs(dataset_name))
+        self._run_backbone(image_tensor, segment_data)
 
         for k, v in segment_data["features"].items():
             if not torch.isfinite(v).all():
@@ -394,7 +629,12 @@ class SAN(nn.Module):
             for k, v in segment_data["features"].items()
         }
         mask_preds, mask_logits = self.side_adapter_network(image_tensor, backbone_features)
-        return mask_logits, mask_preds
+        concept_out = None
+        if share_pass:
+            concept_out = {"scores": segment_data["concept_scores"], "hw": (h, w)}
+        elif use_concepts:
+            concept_out = self.concept_pass(image_tensor, dataset_name)
+        return mask_logits, mask_preds, concept_out
 
     def forward(self, batched_inputs):
         images = [x["image"].to(local_config.device).float() / 255.0 for x in batched_inputs]
@@ -407,7 +647,11 @@ class SAN(nn.Module):
         images_tensor = images.tensor
 
         dataset_name = self._dataset_name(batched_inputs)
-        mask_logits, mask_preds = self.call_model(images_tensor, dataset_name)
+        if self.concept_gt_masks and not self.training:
+            return self.gt_mask_inference(batched_inputs, images, dataset_name)
+        if self.concept_lora and self.training:
+            return self.concept_train_forward(batched_inputs, images, dataset_name)
+        mask_logits, mask_preds, concept_out = self.call_model(images_tensor, dataset_name)
         if self.training:
             if "instances" in batched_inputs[0]:
                 gt_instances = [x["instances"].to(local_config.device) for x in batched_inputs]
@@ -444,6 +688,26 @@ class SAN(nn.Module):
             mask_preds = mask_preds[-1]
             mask_logits = mask_logits[-1]
             # Inference
+            concept_cls = concept_pixels = None
+            if self.concept_enabled:
+                if dataset_name not in self.concept_embs:
+                    raise KeyError(f"No concept embeddings for '{dataset_name}'.")
+                with torch.autocast(images_tensor.device.type, enabled=False):
+                    if self.concept_pixel_baseline:
+                        # Diagnostic: per-patch class probabilities, no masks.
+                        concept_pixels = F.interpolate(
+                            self.concept_classifier.pixel_map(
+                                concept_out["scores"], concept_out["hw"]
+                            ),
+                            size=(images.tensor.shape[-2], images.tensor.shape[-1]),
+                            mode="bilinear",
+                            align_corners=False,
+                        )
+                    else:
+                        # (B, Q, C) class probabilities, pooled on the patch grid.
+                        concept_cls = self.concept_classifier(
+                            concept_out["scores"], mask_preds, concept_out["hw"]
+                        )
             mask_preds = F.interpolate(
                 mask_preds,
                 size=(images.tensor.shape[-2], images.tensor.shape[-1]),
@@ -451,12 +715,27 @@ class SAN(nn.Module):
                 align_corners=False,
             )
             processed_results = []
-            for mask_cls_result, mask_pred_result, input_per_image, image_size in zip(
+            for i, (mask_cls_result, mask_pred_result, input_per_image, image_size) in enumerate(zip(
                 mask_logits, mask_preds, batched_inputs, images.image_sizes
-            ):
+            )):
                 height = input_per_image.get("height", image_size[0])
                 width = input_per_image.get("width", image_size[1])
                 processed_results.append({})
+
+                if concept_pixels is not None:
+                    processed_results[-1]["sem_seg"] = retry_if_cuda_oom(sem_seg_postprocess)(
+                        concept_pixels[i], image_size, height, width
+                    )
+                    continue
+
+                if concept_cls is not None:
+                    # Replace the (object / no object) scores with open-vocabulary
+                    # class probabilities from concept attention.
+                    cls_probs = concept_cls[i]
+                    if self.concept_weight_by_objectness:
+                        objectness = F.softmax(mask_cls_result.float(), dim=-1)[:, :-1].sum(-1)
+                        cls_probs = cls_probs * objectness[:, None]
+                    mask_cls_result = cls_probs
 
                 if self.oracle_classes:
                     # Replace the predicted class scores with one-hot GT classes.
@@ -480,7 +759,9 @@ class SAN(nn.Module):
                     )
                     mask_cls_result = mask_cls_result.to(mask_pred_result)
                 r = retry_if_cuda_oom(self.semantic_inference)(
-                    mask_cls_result, mask_pred_result, cls_are_probs=self.oracle_classes
+                    mask_cls_result,
+                    mask_pred_result,
+                    cls_are_probs=self.oracle_classes or concept_cls is not None,
                 )
                 if not self.sem_seg_postprocess_before_inference:
                     r = retry_if_cuda_oom(sem_seg_postprocess)(
@@ -488,6 +769,50 @@ class SAN(nn.Module):
                     )
                 processed_results[-1]["sem_seg"] = r
             return processed_results
+
+    @torch.no_grad()
+    def gt_mask_inference(self, batched_inputs, images, dataset_name):
+        """Classify the ground-truth segments with concept attention
+        (MODEL.CONCEPT.GT_MASKS). The side adapter is not run. Every GT class
+        present in an image gives one mask; it is painted with the class
+        probabilities the classifier predicts for it."""
+        with torch.autocast(
+            "cuda", dtype=self.amp_dtype or torch.float32, enabled=self.amp_dtype is not None
+        ):
+            concept_out = self.concept_pass(images.tensor, dataset_name)
+        h, w = concept_out["hw"]
+        H_pad, W_pad = images.tensor.shape[-2:]
+        num_classes = len(self.class_labels[dataset_name])
+        ignore_label = self._ignore_label(dataset_name)
+        pixel_scores = self.concept_classifier.pixel_scores(concept_out["scores"])  # (B, h*w, C)
+        stats = self.concept_gt_stats.setdefault(dataset_name, [0, 0])
+
+        processed_results = []
+        for i, (input_per_image, image_size) in enumerate(zip(batched_inputs, images.image_sizes)):
+            height = input_per_image.get("height", image_size[0])
+            width = input_per_image.get("width", image_size[1])
+            gt = self._gt_sem_seg(input_per_image, image_size)  # (H, W), unpadded input size
+            valid = (gt != ignore_label) & (gt >= 0) & (gt < num_classes)
+            gt_classes = torch.unique(gt[valid])
+            sem_seg = torch.zeros(num_classes, *gt.shape, device=gt.device, dtype=torch.float32)
+            if gt_classes.numel() > 0:
+                masks = (gt[None] == gt_classes[:, None, None]).float()  # (S, H, W)
+                # Fraction of every PixelDiT patch covered by each segment.
+                padded = F.pad(masks, (0, W_pad - gt.shape[1], 0, H_pad - gt.shape[0]))
+                weights = F.adaptive_avg_pool2d(padded[None], (h, w))[0].flatten(1)  # (S, h*w)
+                probs = self.concept_classifier.pool(pixel_scores[i], weights)       # (S, C)
+                sem_seg = torch.einsum("sc,shw->chw", probs, masks)
+                stats[0] += int((probs.argmax(dim=-1) == gt_classes).sum())
+                stats[1] += int(gt_classes.numel())
+                if stats[1] // 500 != (stats[1] - gt_classes.numel()) // 500:
+                    get_root_logger().info(
+                        f"[{dataset_name}] GT-mask classification top-1: "
+                        f"{100.0 * stats[0] / stats[1]:.2f}% of {stats[1]} segments"
+                    )
+            processed_results.append(
+                {"sem_seg": retry_if_cuda_oom(sem_seg_postprocess)(sem_seg, image_size, height, width)}
+            )
+        return processed_results
 
     def _dataset_name(self, batched_inputs):
         names = {x.get("meta", {}).get("dataset_name", self.default_dataset) for x in batched_inputs}

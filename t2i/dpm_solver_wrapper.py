@@ -27,10 +27,14 @@ class DPM_Solver_Wrapper(DPM_Solver):
         t = torch.tensor(local_config.timestep, device=local_config.device, dtype=torch.float32)
         return self.model_fn(x, t) 
 
-    def segment(self, x, segment_data):
+    def segment(self, x, segment_data, timestep=None):
+        # timestep: flow time in [0, 1] (0 = clean image, 1 = pure noise);
+        # defaults to local_config.timestep. x must already be noised accordingly.
         # fp32: the model casts the timestep to its own dtype (it used to be forced
         # to bfloat16 here, whatever dtype the model ran in).
-        t = torch.tensor(local_config.timestep, device=local_config.device, dtype=torch.float32)
+        if timestep is None:
+            timestep = local_config.timestep
+        t = torch.tensor(timestep, device=local_config.device, dtype=torch.float32)
         return self.model(x, t, segment_data=segment_data) 
 
     # def precompute_language_embs_wrapper(self):

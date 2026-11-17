@@ -6,7 +6,13 @@ It checks:
      requested layers with the right shapes, and runs only the blocks it needs;
   2. the side adapter fuses (B, 1536, h, w) features, returns deep-supervision
      outputs in training and one output at inference, and the class-agnostic
-     set criterion back-propagates into the fusion layers, side ViT and heads.
+     set criterion back-propagates into the fusion layers, side ViT and heads;
+  3. the concept stream (ConceptAttention) leaves the image features untouched,
+     returns per-layer scores of the right shape, and the mask classifier turns
+     them into per-mask class probabilities;
+  4. the concept LoRA starts as a no-op, never changes the image features, and
+     the cross-entropy on mask-pooled logits back-propagates into it (and only
+     into it and the learned head).
 """
 import os
 import sys
@@ -20,6 +26,7 @@ from detectron2.projects.deeplab import add_deeplab_config
 
 import t2i.config as local_config
 from san.config import add_san_config
+from san.model.concept_classifier import ConceptLoRA, ConceptMaskClassifier
 from san.model.criterion import SetCriterion
 from san.model.matcher import HungarianMatcher
 from san.model.side_adapter import build_side_adapter_network
@@ -131,7 +138,176 @@ def check_side_adapter():
     print("eval: ok")
 
 
+def check_concept_stream():
+    local_config.layer_count = 4
+    core = PixDiT_T2I(
+        hidden_size=96, num_groups=4, patch_depth=14, txt_embed_dim=32, txt_max_length=8
+    ).to(device).eval()
+    assert len(core.patch_blocks) == 4, len(core.patch_blocks)
+    B, K, hw = 2, 5, (8, 6)
+    x = torch.randn(B, 3, 128, 96, device=device)
+    t = torch.full((B,), 2.0, device=device)
+    y = torch.randn(1, 8, 32, device=device)
+    concepts = torch.randn(K, 32, device=device)
+
+    calls = []
+    hooks = [b.register_forward_hook(lambda m, i, o, k=k: calls.append(k)) for k, b in enumerate(core.patch_blocks)]
+    plain = {"feature_layers": [1, 2, 3]}
+    with torch.no_grad():
+        core(x, t, y, segment_data=plain)
+    assert calls == [0, 1, 2], calls
+    assert "concept_scores" not in plain
+
+    calls.clear()
+    seg = {
+        "feature_layers": [1, 2, 3],
+        "concepts": concepts,
+        "concept_layers": [1, 2, 3, 4],
+        "concept_position": 2,
+    }
+    with torch.no_grad():
+        core(x, t, y, segment_data=seg)
+    for h in hooks:
+        h.remove()
+    assert calls == [0, 1, 2, 3], f"concept layer 4 needs block 3 to run, ran {calls}"
+    # Concepts must not leak into the image stream: features are bit-identical.
+    for k in [1, 2, 3]:
+        assert torch.equal(plain["features"][k], seg["features"][k]), f"layer {k} changed"
+    scores = seg["concept_scores"]
+    assert sorted(scores) == [1, 2, 3, 4], scores.keys()
+    for k, v in scores.items():
+        assert v.shape == (B, hw[0] * hw[1], K) and v.dtype == torch.float32, (k, v.shape, v.dtype)
+        assert torch.isfinite(v).all(), k
+
+    # The order of the concepts carries no meaning: permuting them permutes the scores.
+    perm = torch.randperm(K, device=device)
+    seg_p = dict(seg, concepts=concepts[perm])
+    with torch.no_grad():
+        core(x, t, y, segment_data=seg_p)
+    for k in scores:
+        assert torch.allclose(seg_p["concept_scores"][k], scores[k][..., perm], atol=1e-4, rtol=1e-4), k
+
+    # Bad layers are rejected.
+    try:
+        with torch.no_grad():
+            core(x, t, y, segment_data=dict(seg, concept_layers=[5]))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("concept layer 5 > 4 built blocks should raise")
+
+    Q = 7
+    mask_logits = torch.randn(B, Q, *hw, device=device)
+    for pixel_softmax in (True, False):
+        clf = ConceptMaskClassifier(temperature=0.5, pixel_softmax=pixel_softmax)
+        probs = clf(scores, mask_logits, hw)
+        assert probs.shape == (B, Q, K), probs.shape
+        assert torch.allclose(probs.sum(-1), torch.ones(B, Q, device=device), atol=1e-4), probs.sum(-1)
+        pix = clf.pixel_map(scores, hw)
+        assert pix.shape == (B, K, *hw), pix.shape
+        assert torch.allclose(pix.sum(1), torch.ones(B, *hw, device=device), atol=1e-4)
+    # A mask covering exactly one patch gets that patch's class distribution.
+    clf = ConceptMaskClassifier(binarize_masks=True)
+    one = torch.full((B, 1, *hw), -20.0, device=device)
+    one[:, :, 3, 4] = 20.0
+    idx = 3 * hw[1] + 4
+    assert torch.allclose(clf(scores, one, hw)[:, 0], clf.pixel_scores(scores)[:, idx], atol=1e-5)
+    # Empty binarized mask -> all-zero row (no object).
+    assert clf(scores, torch.full((B, 1, *hw), -20.0, device=device), hw).abs().sum() == 0
+    # Concept-only pass (no side-adapter features), as used for the noised pass.
+    only = {"feature_layers": [], "concepts": concepts, "concept_layers": [2, 4], "concept_position": 2}
+    with torch.no_grad():
+        core(x, t, y, segment_data=only)
+    assert only["features"] == {} and sorted(only["concept_scores"]) == [2, 4]
+    for k in (2, 4):
+        assert torch.allclose(only["concept_scores"][k], scores[k], atol=1e-4, rtol=1e-4), k
+    # Pooling with explicit per-patch weights (GT masks), unbatched.
+    clf = ConceptMaskClassifier()
+    wts = torch.zeros(2, hw[0] * hw[1], device=device)
+    wts[0, idx] = 1.0
+    wts[1] = 1.0
+    pooled = clf.pool(clf.pixel_scores(scores)[0], wts)
+    assert pooled.shape == (2, K), pooled.shape
+    assert torch.allclose(pooled[0], clf.pixel_scores(scores)[0, idx], atol=1e-5)
+    assert torch.allclose(pooled[1], clf.pixel_scores(scores)[0].mean(0), atol=1e-5)
+    # Masks on a different grid than the PixelDiT patches.
+    probs = ConceptMaskClassifier()(scores, torch.randn(B, Q, 16, 12, device=device), hw)
+    assert probs.shape == (B, Q, K), probs.shape
+    print("concept stream + mask classifier: ok")
+
+
+def check_concept_lora():
+    local_config.layer_count = 4
+    core = PixDiT_T2I(
+        hidden_size=96, num_groups=4, patch_depth=14, txt_embed_dim=32, txt_max_length=8
+    ).to(device).eval()
+    for p in core.parameters():
+        p.requires_grad = False
+    B, K, hw = 2, 5, (8, 6)
+    P = hw[0] * hw[1]
+    x = torch.randn(B, 3, 128, 96, device=device)
+    t = torch.full((B,), 400.0, device=device)
+    y = torch.randn(1, 8, 32, device=device)
+    concepts = torch.randn(K, 32, device=device)
+    layers = [1, 2, 3, 4]
+    base = {"feature_layers": [1, 2, 3], "concepts": concepts, "concept_layers": layers, "concept_position": 2}
+
+    plain = dict(base)
+    with torch.no_grad():
+        core(x, t, y, segment_data=plain)
+
+    lora = ConceptLoRA(96, num_blocks=4, rank=4, alpha=4.0).to(device)
+    # Zero-initialised up projections: identical to the frozen model.
+    seg = dict(base, concept_adapter=lora)
+    with torch.no_grad():
+        core(x, t, y, segment_data=seg)
+    for k in layers:
+        assert torch.equal(seg["concept_scores"][k], plain["concept_scores"][k]), k
+
+    # Training step: cosine scores, learned head, CE on mask-pooled logits.
+    clf = ConceptMaskClassifier(learned=True, num_layers=len(layers)).to(device)
+    seg = dict(base, concept_adapter=lora, concept_cosine=True)
+    core(x, t, y, segment_data=seg)  # grad enabled
+    for k in layers:
+        s = seg["concept_scores"][k]
+        assert s.requires_grad and s.abs().max() <= 1 + 1e-4, (k, s.abs().max())
+    for k in [1, 2, 3]:
+        assert not seg["features"][k].requires_grad
+        assert torch.equal(seg["features"][k], plain["features"][k]), f"layer {k} changed"
+    S = 3
+    weights = torch.rand(S, P, device=device)
+    logits = clf.pool_logits(clf.pixel_scores(seg["concept_scores"])[0], weights)
+    assert logits.shape == (S, K), logits.shape
+    loss = torch.nn.functional.cross_entropy(
+        logits, torch.randint(0, K, (S,), device=device), label_smoothing=0.1
+    )
+    assert torch.isfinite(loss), loss
+    loss.backward()
+    # Up projections get gradients right away (the down ones only once up != 0).
+    for name, p in lora.named_parameters():
+        if "_up" in name:
+            assert p.grad is not None and torch.isfinite(p.grad).all(), name
+    assert any(p.grad.abs().sum() > 0 for n, p in lora.named_parameters() if "_up" in n)
+    assert clf.logit_scale.grad is not None and clf.layer_logits.grad is not None
+    assert all(p.grad is None for p in core.parameters())
+
+    # A non-zero adapter changes the concept scores but never the image features.
+    with torch.no_grad():
+        for p in lora.parameters():
+            p.normal_(std=0.1)
+        seg = dict(base, concept_adapter=lora)
+        core(x, t, y, segment_data=seg)
+    assert not torch.allclose(seg["concept_scores"][4], plain["concept_scores"][4])
+    for k in [1, 2, 3]:
+        assert torch.equal(seg["features"][k], plain["features"][k]), f"layer {k} changed"
+    probs = clf.pool(clf.pixel_scores(seg["concept_scores"])[0], weights)
+    assert torch.allclose(probs.sum(-1), torch.ones(S, device=device), atol=1e-4)
+    print("concept LoRA: ok")
+
+
 if __name__ == "__main__":
     check_feature_hook()
+    check_concept_stream()
+    check_concept_lora()
     check_side_adapter()
     print("all checks passed")

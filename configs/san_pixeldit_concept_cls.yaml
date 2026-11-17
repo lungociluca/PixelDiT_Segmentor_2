@@ -1,0 +1,17 @@
+# Open-vocabulary mask classification from PixelDiT concept attention.
+# The classifier is training-free. With GT_MASKS it classifies the ground-truth
+# segments and the side adapter is not run, so no checkpoint is needed; set
+# GT_MASKS: False to classify the side adapter's masks instead.
+_BASE_: san_clip_vit_res4_coco.yaml
+MODEL:
+  SAN:
+    ORACLE_CLASSES:
+      ENABLED: False
+  CONCEPT:
+    ENABLED: True
+    LAYERS: [1, 2, 3, 4]   # first 4 PixelDiT blocks
+    TIMESTEP: 0.4          # 40% noise: x_t = 0.6 * image + 0.4 * noise
+    GT_MASKS: True
+    TEMPERATURE: 1.0
+    PIXEL_SOFTMAX: True
+    PIXEL_BASELINE: False

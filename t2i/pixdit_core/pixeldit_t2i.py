@@ -56,7 +56,18 @@ class MMDiTJointAttention(nn.Module):
             pos_img: torch.Tensor,
             pos_txt: torch.Tensor = None,
             attn_mask: torch.Tensor = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+            concept: torch.Tensor = None,
+            pos_concept: torch.Tensor = None,
+            concept_adapter=None,
+    ) -> Tuple[torch.Tensor, ...]:
+        # concept_adapter: optional trainable low-rank update of qkv_y / proj_y that
+        # is applied to the concept tokens only (see san.model.concept_classifier.
+        # ConceptLoRA); the prompt tokens keep the frozen weights.
+        # concept: optional (B, K, C) concept tokens (ConceptAttention,
+        # arXiv:2502.04320). They go through the text-stream weights and attend to
+        # the image tokens and to each other; image and prompt tokens never attend
+        # to them, so out_x / out_y are exactly what they are without concepts.
+        # With concepts the return value is (out_x, out_y, out_concept).
         B, Nx, C = x.shape
         By, Ny, Cy = y.shape
         assert B == By and C == Cy, "x and y must share batch and channel dims"
@@ -97,7 +108,34 @@ class MMDiTJointAttention(nn.Module):
         out_x = self.proj_drop_x(self.proj_x(out_x))
         out_y = self.proj_drop_y(self.proj_y(out_y))
 
-        return out_x, out_y
+        if concept is None:
+            return out_x, out_y
+
+        Nc = concept.shape[1]
+        qkv_c = self.qkv_y(concept)
+        if concept_adapter is not None:
+            qkv_c = qkv_c + concept_adapter.qkv(self.block_id, concept)
+        qkv_c = qkv_c.reshape(B, Nc, 3, self.num_heads, C // self.num_heads).permute(2, 0, 1, 3, 4)
+        qc, kc, vc = qkv_c[0], qkv_c[1], qkv_c[2]
+        qc = self.q_norm_y(qc)
+        kc = self.k_norm_y(kc)
+        if pos_concept is not None:
+            qc, kc = apply_rotary_emb(qc, kc, freqs_cis=pos_concept)
+        qc = qc.transpose(1, 2)
+        kc = kc.transpose(1, 2)
+        vc = vc.transpose(1, 2)
+        # Concept queries over [image keys, concept keys]: cross-attention to the
+        # image plus self-attention among the concepts. No padding mask is needed,
+        # neither group has padded tokens.
+        out_c = F.scaled_dot_product_attention(
+            qc, torch.cat([kx, kc], dim=2), torch.cat([vx, vc], dim=2), dropout_p=0.0
+        )
+        out_c = out_c.transpose(1, 2).reshape(B, Nc, C)
+        proj_c = self.proj_y(out_c)
+        if concept_adapter is not None:
+            proj_c = proj_c + concept_adapter.proj(self.block_id, out_c)
+        out_c = self.proj_drop_y(proj_c)
+        return out_x, out_y, out_c
 
 class MMDiTBlockT2I(nn.Module):
     def __init__(self, hidden_size, groups, mlp_ratio=4.0, adaLN_modulation_img=None, adaLN_modulation_txt=None, block_id=-1):
@@ -123,20 +161,39 @@ class MMDiTBlockT2I(nn.Module):
 
         self.block_id = block_id
 
-    def forward(self, x, y, c, pos_img, pos_txt=None, attn_mask=None):
+    def forward(self, x, y, c, pos_img, pos_txt=None, attn_mask=None, concept=None, pos_concept=None,
+                concept_adapter=None):
+        # Without `concept`: returns (x, y), as before.
+        # With `concept` (B, K, hidden): returns (x, y, concept, attn_x, attn_concept),
+        # where concept has been updated by the text-stream layers and attn_x /
+        # attn_concept are this block's attention outputs for the image and concept
+        # tokens (the "attention output space" ConceptAttention compares in).
         shift_msa_x, scale_msa_x, gate_msa_x, shift_mlp_x, scale_mlp_x, gate_mlp_x = self.adaLN_modulation_img(c).chunk(6, dim=-1)
         shift_msa_y, scale_msa_y, gate_msa_y, shift_mlp_y, scale_mlp_y, gate_mlp_y = self.adaLN_modulation_txt(c).chunk(6, dim=-1)
 
         x_norm = apply_adaln(self.norm_x1(x), shift_msa_x, scale_msa_x)
         y_norm = apply_adaln(self.norm_y1(y), shift_msa_y, scale_msa_y)
-        attn_x, attn_y = self.attn(x_norm, y_norm, pos_img, pos_txt, attn_mask)
+        attn_c = None
+        if concept is None:
+            attn_x, attn_y = self.attn(x_norm, y_norm, pos_img, pos_txt, attn_mask)
+        else:
+            c_norm = apply_adaln(self.norm_y1(concept), shift_msa_y, scale_msa_y)
+            attn_x, attn_y, attn_c = self.attn(
+                x_norm, y_norm, pos_img, pos_txt, attn_mask, concept=c_norm, pos_concept=pos_concept,
+                concept_adapter=concept_adapter,
+            )
 
         x = x + gate_msa_x * attn_x
         y = y + gate_msa_y * attn_y
 
         x = x + gate_mlp_x * self.mlp_x(apply_adaln(self.norm_x2(x), shift_mlp_x, scale_mlp_x))
         y = y + gate_mlp_y * self.mlp_y(apply_adaln(self.norm_y2(y), shift_mlp_y, scale_mlp_y))
-        return x, y
+        if concept is None:
+            return x, y
+
+        concept = concept + gate_msa_y * attn_c
+        concept = concept + gate_mlp_y * self.mlp_y(apply_adaln(self.norm_y2(concept), shift_mlp_y, scale_mlp_y))
+        return x, y, concept, attn_x, attn_c
 
 class PixDiT_T2I(nn.Module):
     def __init__(
@@ -247,6 +304,36 @@ class PixDiT_T2I(nn.Module):
         self.precompute_pos_txt[length] = freqs_cis
         return freqs_cis
 
+    def embed_concepts(self, concepts, batch, Ltxt, ref, position=0):
+        """Raw text-encoder concept vectors (K, txt_embed_dim) -> concept tokens.
+
+        Same projection + norm as the prompt tokens. Every concept is placed at
+        the same text position (learned positional embedding and text RoPE), so
+        no concept is favoured by where it sits. Returns (B, K, hidden) tokens in
+        `ref`'s dtype and the (K, head_dim / 2) RoPE factors (None without text RoPE).
+        """
+        if concepts.dim() != 2 or concepts.shape[-1] != self.txt_embed_dim:
+            raise ValueError(
+                f"concepts must be (K, {self.txt_embed_dim}), got {tuple(concepts.shape)}"
+            )
+        position = int(position)
+        if not 0 <= position < Ltxt:
+            raise ValueError(f"concept position {position} outside the text length {Ltxt}")
+        with torch.autocast(ref.device.type, enabled=False):
+            proj = self.y_embedder.proj
+            c = F.linear(
+                concepts.to(ref.device, dtype=torch.float32),
+                proj.weight.float(),
+                proj.bias.float() if proj.bias is not None else None,
+            )
+            c = self.y_embedder.norm(c)
+        c = c.to(ref.dtype)[None] + self.y_pos_embedding[:, position:position + 1, :].to(ref.dtype)
+        c = c.expand(batch, -1, -1)
+        pos_c = None
+        if self.use_text_rope:
+            pos_c = self.fetch_pos_text(Ltxt, ref.device)[position:position + 1].expand(concepts.shape[0], -1)
+        return c, pos_c
+
     def initialize_weights(self):
         w = self.s_embedder.proj.weight.data
         nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
@@ -289,6 +376,29 @@ class PixDiT_T2I(nn.Module):
         condition = torch.nn.functional.silu(t_emb)
         num_blocks = min(self.patch_depth, local_config.layer_count, len(self.patch_blocks))
         tap_layers = None
+        concept_layers = None
+        c_emb = pos_c = None
+        if segment_data is not None and segment_data.get("concepts") is not None:
+            # ConceptAttention: segment_data["concepts"] is (K, txt_embed_dim), one
+            # raw text-encoder vector per concept. For every layer k in
+            # segment_data["concept_layers"] (1-based block index) the similarity of
+            # each image token to each concept in block k's attention output space
+            # is returned in segment_data["concept_scores"][k] as (B, Hs*Ws, K) fp32.
+            # Optional: segment_data["concept_adapter"] (trainable low-rank update of
+            # the concept path) and segment_data["concept_cosine"] (cosine instead
+            # of dot-product similarity).
+            concept_layers = sorted(set(int(k) for k in segment_data.get("concept_layers") or []))
+            if not concept_layers or not 1 <= concept_layers[0] <= concept_layers[-1] <= num_blocks:
+                raise ValueError(
+                    f"concept_layers {concept_layers} must be non-empty and lie in 1..{num_blocks} "
+                    f"(local_config.layer_count={local_config.layer_count}, patch_depth={self.patch_depth})"
+                )
+            c_emb, pos_c = self.embed_concepts(
+                segment_data["concepts"], B, Ltxt, x, segment_data.get("concept_position", 0)
+            )
+            concept_scores = {}
+            concept_adapter = segment_data.get("concept_adapter")
+            concept_cosine = bool(segment_data.get("concept_cosine", False))
         if segment_data is not None:
             # Feature hook for downstream heads: the patch-grid size, plus image tokens
             # (B, Hs*Ws, hidden) for every layer in segment_data["feature_layers"]
@@ -307,6 +417,8 @@ class PixDiT_T2I(nn.Module):
                     )
                 # Blocks deeper than the last tapped layer are not needed.
                 num_blocks = tap_layers[-1] if tap_layers else 0
+                if concept_layers is not None:
+                    num_blocks = max(num_blocks, concept_layers[-1])
                 features = {}
             patch_features = []
 
@@ -330,7 +442,21 @@ class PixDiT_T2I(nn.Module):
                 features[0] = s0
 
             for i in range(num_blocks):
-                s, y_emb = self.patch_blocks[i](s, y_emb, condition, pos, pos_txt, attn_mask_joint)
+                if c_emb is not None and i < concept_layers[-1]:
+                    s, y_emb, c_emb, attn_x, attn_c = self.patch_blocks[i](
+                        s, y_emb, condition, pos, pos_txt, attn_mask_joint,
+                        concept=c_emb, pos_concept=pos_c, concept_adapter=concept_adapter,
+                    )
+                    if (i + 1) in concept_layers:
+                        # fp32: a hidden_size-term dot product of unnormalised vectors.
+                        with torch.autocast(x.device.type, enabled=False):
+                            ox, oc = attn_x.float(), attn_c.float()
+                            if concept_cosine:
+                                ox = F.normalize(ox, dim=-1)
+                                oc = F.normalize(oc, dim=-1)
+                            concept_scores[i + 1] = torch.einsum("bld,bkd->blk", ox, oc)
+                else:
+                    s, y_emb = self.patch_blocks[i](s, y_emb, condition, pos, pos_txt, attn_mask_joint)
                 if 0 < self.repa_encoder_index == (i + 1):
                     self.last_repa_tokens = s
                 if tap_layers is not None:
@@ -343,4 +469,6 @@ class PixDiT_T2I(nn.Module):
                 segment_data["features"] = features
             elif segment_data is not None:
                 segment_data["patch_features"] = torch.stack(patch_features, dim=1)
+            if concept_layers is not None:
+                segment_data["concept_scores"] = concept_scores
         return x

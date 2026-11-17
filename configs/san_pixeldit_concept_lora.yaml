@@ -1,0 +1,29 @@
+# Trained concept classifier: low-rank adapters on the concept path of the frozen
+# PixelDiT + learned layer weights / logit scale. Trains on ground-truth segments
+# only (the side adapter is frozen and not run) and evaluates on ground-truth
+# segments of the test datasets.
+#   train: python train_net.py --config-file configs/san_pixeldit_concept_lora.yaml --num-gpus 1 OUTPUT_DIR output_concept
+#   eval:  add --eval-only MODEL.WEIGHTS output_concept/model_final.pth
+_BASE_: san_pixeldit_concept_cls.yaml
+MODEL:
+  CONCEPT:
+    LAYERS: [1, 2, 3, 4]
+    TIMESTEP: 0.4
+    GT_MASKS: True
+    LORA:
+      ENABLED: True
+      RANK: 16
+      ALPHA: 16.0
+      COSINE: True
+      INIT_LOGIT_SCALE: 20.0
+      LABEL_SMOOTHING: 0.1
+      # e.g. ["dog", "bus", "couch"]: trained without them, to test on unseen classes.
+      HOLDOUT_CLASSES: []
+SOLVER:
+  BASE_LR: 0.0001
+  MAX_ITER: 1999        # optimizer steps (each = IMS_PER_BATCH * GRAD_ACCUM_STEPS images)
+TEST:
+  EVAL_PERIOD: 500
+
+# voc 22.3  23.6
+# ade 15.44 17.49
