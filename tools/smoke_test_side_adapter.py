@@ -12,7 +12,10 @@ It checks:
      them into per-mask class probabilities;
   4. the concept LoRA starts as a no-op, never changes the image features, and
      the cross-entropy on mask-pooled logits back-propagates into it (and only
-     into it and the learned head).
+     into it and the learned head);
+  5. the image LoRA starts as a no-op, trains through the image stream (with
+     and without gradient checkpointing, same gradients), and the mask-embedding
+     head + ensemble give per-mask class probabilities with gradients.
 """
 import os
 import sys
@@ -26,7 +29,7 @@ from detectron2.projects.deeplab import add_deeplab_config
 
 import t2i.config as local_config
 from san.config import add_san_config
-from san.model.concept_classifier import ConceptLoRA, ConceptMaskClassifier
+from san.model.concept_classifier import ConceptLoRA, ConceptMaskClassifier, MaskEmbedHead, ensemble_probs
 from san.model.criterion import SetCriterion
 from san.model.matcher import HungarianMatcher
 from san.model.side_adapter import build_side_adapter_network
@@ -309,9 +312,89 @@ def check_concept_lora():
     print("concept LoRA: ok")
 
 
+def check_image_lora_and_mask_head():
+    local_config.layer_count = 4
+    core = PixDiT_T2I(
+        hidden_size=96, num_groups=4, patch_depth=14, txt_embed_dim=32, txt_max_length=8
+    ).to(device).eval()
+    for p in core.parameters():
+        p.requires_grad = False
+    B, K, hw = 2, 5, (8, 6)
+    P = hw[0] * hw[1]
+    x = torch.randn(B, 3, 128, 96, device=device)
+    t = torch.full((B,), 400.0, device=device)
+    y = torch.randn(1, 8, 32, device=device)
+    concepts = torch.randn(K + 2, 32, device=device)       # 2 extra synonyms
+    variant_class = torch.tensor([0, 1, 1, 2, 3, 4, 4], device=device)
+    layers = [2, 4]
+    base = {"feature_layers": [2, 3, 4], "concepts": concepts, "concept_layers": layers, "concept_position": 2}
+    plain = dict(base)
+    with torch.no_grad():
+        core(x, t, y, segment_data=plain)
+
+    img = ConceptLoRA(96, num_blocks=4, rank=4, alpha=4.0).to(device)
+    seg = dict(base, image_adapter=img)
+    with torch.no_grad():
+        core(x, t, y, segment_data=seg)
+    for k in [2, 3, 4]:
+        assert torch.equal(seg["features"][k], plain["features"][k]), k
+    with torch.no_grad():
+        for p in img.parameters():
+            p.normal_(std=0.05)
+
+    head = MaskEmbedHead(96, 32, num_layers=3, embed_dim=16, hidden_dim=24).to(device)
+    S = 3
+    weights = torch.rand(S, P, device=device)
+    targets = torch.randint(0, K, (S,), device=device)
+
+    def step(checkpoint):
+        img.zero_grad(set_to_none=True)
+        head.zero_grad(set_to_none=True)
+        seg = dict(base, image_adapter=img, grad_checkpoint=checkpoint)
+        core(x, t, y, segment_data=seg)
+        assert all(seg["features"][k].requires_grad for k in [2, 3, 4])
+        feats = {k: v[0] for k, v in seg["features"].items()}
+        logits = head.logits(feats, weights, concepts, variant_class, K)
+        assert logits.shape == (S, K), logits.shape
+        loss = torch.nn.functional.cross_entropy(logits, targets)
+        loss.backward()
+        return loss.detach(), {n: p.grad.clone() for n, p in img.named_parameters() if p.grad is not None}
+
+    l1, g1 = step(True)
+    l2, g2 = step(False)
+    assert torch.allclose(l1, l2, atol=1e-5), (l1, l2)
+    assert g1.keys() == g2.keys() and len(g1) > 0
+    for n in g1:
+        assert torch.allclose(g1[n], g2[n], atol=1e-4, rtol=1e-3), n
+    assert all(p.grad is not None for p in head.parameters())
+    assert all(p.grad is None for p in core.parameters())
+    # The image adapter changes the image features (only in this pass).
+    assert not torch.allclose(seg_features(core, x, t, y, base, img)[4], plain["features"][4])
+
+    # Geometric ensemble.
+    concept_probs = torch.softmax(torch.randn(S, K, device=device), -1)
+    concept_probs[2] = 0  # empty mask
+    with torch.no_grad():
+        hl = head.logits({k: v[0] for k, v in plain["features"].items()}, weights, concepts, variant_class, K)
+    ens = ensemble_probs(concept_probs, hl, 0.5)
+    assert torch.allclose(ens[:2].sum(-1), torch.ones(2, device=device), atol=1e-5)
+    assert ens[2].abs().sum() == 0
+    assert torch.equal(ensemble_probs(concept_probs, hl, 0.0), concept_probs)
+    assert torch.allclose(ensemble_probs(concept_probs, hl, 1.0)[0], hl[0].softmax(-1), atol=1e-6)
+    print("image LoRA + mask head: ok")
+
+
+@torch.no_grad()
+def seg_features(core, x, t, y, base, img):
+    seg = dict(base, image_adapter=img)
+    core(x, t, y, segment_data=seg)
+    return seg["features"]
+
+
 if __name__ == "__main__":
     check_feature_hook()
     check_concept_stream()
     check_concept_lora()
+    check_image_lora_and_mask_head()
     check_side_adapter()
     print("all checks passed")

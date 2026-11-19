@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint
 from typing import Tuple
 
 from .pixeldit_c2i import PatchTokenEmbedder, PixelTokenEmbedder, PiTBlock
@@ -59,7 +60,12 @@ class MMDiTJointAttention(nn.Module):
             concept: torch.Tensor = None,
             pos_concept: torch.Tensor = None,
             concept_adapter=None,
+            image_adapter=None,
     ) -> Tuple[torch.Tensor, ...]:
+        # image_adapter: optional trainable low-rank update of qkv_x / proj_x (same
+        # interface as concept_adapter), applied to the image tokens. Unlike the
+        # concept adapter it changes the image (and prompt) stream, so it is only
+        # passed in the concept-scoring pass, never in the side adapter's pass.
         # concept_adapter: optional trainable low-rank update of qkv_y / proj_y that
         # is applied to the concept tokens only (see san.model.concept_classifier.
         # ConceptLoRA); the prompt tokens keep the frozen weights.
@@ -72,7 +78,10 @@ class MMDiTJointAttention(nn.Module):
         By, Ny, Cy = y.shape
         assert B == By and C == Cy, "x and y must share batch and channel dims"
 
-        qkv_x = self.qkv_x(x).reshape(B, Nx, 3, self.num_heads, C // self.num_heads).permute(2, 0, 1, 3, 4)
+        qkv_x = self.qkv_x(x)
+        if image_adapter is not None:
+            qkv_x = qkv_x + image_adapter.qkv(self.block_id, x)
+        qkv_x = qkv_x.reshape(B, Nx, 3, self.num_heads, C // self.num_heads).permute(2, 0, 1, 3, 4)
         qx, kx, vx = qkv_x[0], qkv_x[1], qkv_x[2]
         qx = self.q_norm_x(qx)
         kx = self.k_norm_x(kx)
@@ -105,7 +114,10 @@ class MMDiTJointAttention(nn.Module):
         out_y = out_y.transpose(1, 2).reshape(B, Ny, C)
         out_x = out_x.transpose(1, 2).reshape(B, Nx, C)
 
-        out_x = self.proj_drop_x(self.proj_x(out_x))
+        if image_adapter is not None:
+            out_x = self.proj_drop_x(self.proj_x(out_x) + image_adapter.proj(self.block_id, out_x))
+        else:
+            out_x = self.proj_drop_x(self.proj_x(out_x))
         out_y = self.proj_drop_y(self.proj_y(out_y))
 
         if concept is None:
@@ -162,7 +174,7 @@ class MMDiTBlockT2I(nn.Module):
         self.block_id = block_id
 
     def forward(self, x, y, c, pos_img, pos_txt=None, attn_mask=None, concept=None, pos_concept=None,
-                concept_adapter=None):
+                concept_adapter=None, image_adapter=None):
         # Without `concept`: returns (x, y), as before.
         # With `concept` (B, K, hidden): returns (x, y, concept, attn_x, attn_concept),
         # where concept has been updated by the text-stream layers and attn_x /
@@ -175,12 +187,12 @@ class MMDiTBlockT2I(nn.Module):
         y_norm = apply_adaln(self.norm_y1(y), shift_msa_y, scale_msa_y)
         attn_c = None
         if concept is None:
-            attn_x, attn_y = self.attn(x_norm, y_norm, pos_img, pos_txt, attn_mask)
+            attn_x, attn_y = self.attn(x_norm, y_norm, pos_img, pos_txt, attn_mask, image_adapter=image_adapter)
         else:
             c_norm = apply_adaln(self.norm_y1(concept), shift_msa_y, scale_msa_y)
             attn_x, attn_y, attn_c = self.attn(
                 x_norm, y_norm, pos_img, pos_txt, attn_mask, concept=c_norm, pos_concept=pos_concept,
-                concept_adapter=concept_adapter,
+                concept_adapter=concept_adapter, image_adapter=image_adapter,
             )
 
         x = x + gate_msa_x * attn_x
@@ -399,6 +411,21 @@ class PixDiT_T2I(nn.Module):
             concept_scores = {}
             concept_adapter = segment_data.get("concept_adapter")
             concept_cosine = bool(segment_data.get("concept_cosine", False))
+        # Optional low-rank update of the image stream (concept-scoring pass only).
+        image_adapter = segment_data.get("image_adapter") if segment_data is not None else None
+        # Recompute block activations in backward when gradients flow through the
+        # image stream (otherwise every block's 4096-token activations are kept).
+        ckpt = image_adapter is not None and torch.is_grad_enabled() and bool(
+            segment_data.get("grad_checkpoint", True)
+        )
+
+        def run_block(i, *args, **kwargs):
+            if ckpt:
+                return torch.utils.checkpoint.checkpoint(
+                    self.patch_blocks[i], *args, use_reentrant=False, **kwargs
+                )
+            return self.patch_blocks[i](*args, **kwargs)
+
         if segment_data is not None:
             # Feature hook for downstream heads: the patch-grid size, plus image tokens
             # (B, Hs*Ws, hidden) for every layer in segment_data["feature_layers"]
@@ -443,9 +470,10 @@ class PixDiT_T2I(nn.Module):
 
             for i in range(num_blocks):
                 if c_emb is not None and i < concept_layers[-1]:
-                    s, y_emb, c_emb, attn_x, attn_c = self.patch_blocks[i](
-                        s, y_emb, condition, pos, pos_txt, attn_mask_joint,
+                    s, y_emb, c_emb, attn_x, attn_c = run_block(
+                        i, s, y_emb, condition, pos, pos_txt, attn_mask_joint,
                         concept=c_emb, pos_concept=pos_c, concept_adapter=concept_adapter,
+                        image_adapter=image_adapter,
                     )
                     if (i + 1) in concept_layers:
                         # fp32: a hidden_size-term dot product of unnormalised vectors.
@@ -456,7 +484,9 @@ class PixDiT_T2I(nn.Module):
                                 oc = F.normalize(oc, dim=-1)
                             concept_scores[i + 1] = torch.einsum("bld,bkd->blk", ox, oc)
                 else:
-                    s, y_emb = self.patch_blocks[i](s, y_emb, condition, pos, pos_txt, attn_mask_joint)
+                    s, y_emb = run_block(
+                        i, s, y_emb, condition, pos, pos_txt, attn_mask_joint, image_adapter=image_adapter
+                    )
                 if 0 < self.repa_encoder_index == (i + 1):
                     self.last_repa_tokens = s
                 if tap_layers is not None:

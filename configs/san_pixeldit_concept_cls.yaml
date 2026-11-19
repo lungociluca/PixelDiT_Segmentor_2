@@ -15,3 +15,19 @@ MODEL:
     TEMPERATURE: 1.0
     PIXEL_SOFTMAX: True
     PIXEL_BASELINE: False
+    # Text side: cleaned names, one concept per synonym (max over them), and a
+    # template ensemble. INSTRUCTION_CONTEXT: encode the names after the default
+    # prompt's instruction (ablation; changes the concept text position).
+    CLEAN_NAMES: True
+    SPLIT_SYNONYMS: True
+    SYNONYM_REDUCE: "max"
+    INSTRUCTION_CONTEXT: False
+    TEMPLATES:
+      - "A picture of a {target}"
+      - "A photo of a {target}."
+      - "A photo of the {target}."
+      - "An image showing a {target}."
+      - "A close-up photo of a {target}."
+      - "A photo of a small {target}."
+      - "A photo of a large {target}."
+      - "There is a {target} in the scene."

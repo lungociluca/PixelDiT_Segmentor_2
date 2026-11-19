@@ -89,6 +89,31 @@ class Trainer(DefaultTrainer):
         return writers
 
     @classmethod
+    def test(cls, cfg, model, evaluators=None):
+        # Per-evaluation diagnostics kept by the model (GT-mask classification
+        # accuracy, oracle mask statistics): reset before, reported after.
+        core = model.module if hasattr(model, "module") else model
+        for attr in ("concept_gt_stats", "oracle_stats"):
+            if isinstance(getattr(core, attr, None), dict):
+                getattr(core, attr).clear()
+        results = super().test(cfg, model, evaluators)
+        logger = logging.getLogger("san")
+        for name in cfg.DATASETS.TEST:
+            gt = getattr(core, "concept_gt_stats", {}).get(name)
+            if gt and gt[1]:
+                acc = 100.0 * gt[0] / gt[1]
+                logger.info(f"[{name}] GT-mask classification top-1: {acc:.2f}% of {gt[1]} segments")
+                if isinstance(results.get(name), dict):
+                    results[name]["gt_mask_cls"] = {"top1": acc, "segments": gt[1]}
+            if hasattr(core, "mask_stats"):
+                stats = core.mask_stats(name)
+                if stats:
+                    logger.info(f"[{name}] masks: {core.format_mask_stats(name)}")
+                    if isinstance(results.get(name), dict):
+                        results[name]["mask_stats"] = stats
+        return results
+
+    @classmethod
     def build_evaluator(cls, cfg, dataset_name, output_folder=None):
         if output_folder is None:
             output_folder = os.path.join(cfg.OUTPUT_DIR, "inference")

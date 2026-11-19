@@ -1,0 +1,15 @@
+# As san_pixeldit_concept_maskhead.yaml, plus low-rank adapters on the image
+# stream of the concept pass (the side adapter keeps the frozen features).
+# Gradients now flow through the image tokens of every concept-pass block:
+# smaller micro-batches with gradient accumulation keep the same 32 images/step.
+_BASE_: san_pixeldit_concept_maskhead.yaml
+MODEL:
+  CONCEPT:
+    IMAGE_LORA:
+      ENABLED: True
+      RANK: 16
+      ALPHA: 16.0
+      GRAD_CHECKPOINT: True
+SOLVER:
+  IMS_PER_BATCH: 8
+  GRAD_ACCUM_STEPS: 4

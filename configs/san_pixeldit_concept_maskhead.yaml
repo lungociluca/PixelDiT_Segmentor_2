@@ -1,0 +1,19 @@
+# Concept classifier (LoRA on the concept path) + trained mask-embedding head on
+# PixelDiT image features, ensembled at inference. Trains on ground-truth segments
+# (side adapter frozen) and evaluates on ground-truth segments, like
+# san_pixeldit_concept_lora.yaml. For predicted masks, train jointly instead:
+#   MODEL.CONCEPT.GT_MASKS False MODEL.CONCEPT.LORA.TRAIN_MODE joint
+#   train: python train_net.py --config-file configs/san_pixeldit_concept_maskhead.yaml --num-gpus 1 OUTPUT_DIR output_maskhead
+#   eval:  add --eval-only MODEL.WEIGHTS output_maskhead/model_final.pth
+#          (MODEL.CONCEPT.MASK_HEAD.ENSEMBLE_ALPHA 0.0 / 1.0: each part on its own)
+_BASE_: san_pixeldit_concept_lora.yaml
+MODEL:
+  CONCEPT:
+    MASK_HEAD:
+      ENABLED: True
+      LAYERS: [2, 3, 4]      # must be <= the deepest block built; go deeper with CONCEPT.LAYERS
+      EMBED_DIM: 768
+      HIDDEN_DIM: 1024
+      TEXT_PROJ: "linear"
+      LOSS_WEIGHT: 1.0
+      ENSEMBLE_ALPHA: 0.5

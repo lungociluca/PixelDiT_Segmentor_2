@@ -83,6 +83,10 @@ def add_san_config(cfg):
     # scores. Without it every query votes with weight 1, including the ones the
     # model has learned are empty.
     cfg.MODEL.SAN.ORACLE_CLASSES.WEIGHT_BY_OBJECTNESS = True
+    # Also measure the class-agnostic masks against every GT class region: mean
+    # best IoU, recall@0.5 / 0.75 and kept objects per image (logged after eval
+    # and added to the results as "mask_stats").
+    cfg.MODEL.SAN.ORACLE_CLASSES.MASK_STATS = True
 
     # Open-vocabulary mask classification from PixelDiT concept attention
     # (ConceptAttention, arXiv:2502.04320). Inference only and training-free: every
@@ -96,6 +100,22 @@ def add_san_config(cfg):
     cfg.MODEL.CONCEPT.LAYERS = [1, 2, 3, 4]
     # Prompt each class name is encoded in; only the name's tokens are pooled.
     cfg.MODEL.CONCEPT.TEMPLATE = "A picture of a {target}"
+    # Template ensemble: when non-empty, replaces TEMPLATE. Every class variant is
+    # encoded in every template and its pooled embeddings are averaged.
+    cfg.MODEL.CONCEPT.TEMPLATES = []
+    # Prepend the instruction ("complex human instruction") of the default prompt
+    # (t2i.config.default_prompt, up to its last "User Prompt:") to every template,
+    # so the text encoder sees class names in the context PixelDiT was trained on.
+    # The concept tokens then sit at the text position of the name in that prompt.
+    cfg.MODEL.CONCEPT.INSTRUCTION_CONTEXT = False
+    # Clean class names before encoding (fixes like "diningtable" -> "dining table",
+    # COCO-Stuff suffixes like "-merged" / "-other" removed, "-" / "_" -> " ").
+    cfg.MODEL.CONCEPT.CLEAN_NAMES = True
+    # Split comma-separated synonyms ("chest of drawers, chest, bureau, dresser")
+    # into one concept each; their per-patch scores are combined into one class
+    # score with SYNONYM_REDUCE ("max" or "mean").
+    cfg.MODEL.CONCEPT.SPLIT_SYNONYMS = True
+    cfg.MODEL.CONCEPT.SYNONYM_REDUCE = "max"
     # "mean": mean of the name's tokens. "last": its last token.
     cfg.MODEL.CONCEPT.POOL = "mean"
     # Divides the similarities before the softmax over classes.
@@ -155,6 +175,35 @@ def add_san_config(cfg):
     # False lets the classifier reshape the masks (end-to-end, as in SAN), which
     # can also shrink them to their most discriminative parts.
     cfg.MODEL.CONCEPT.LORA.DETACH_MASKS = True
+    # Trained mask-embedding head (ODISE-style): image tokens of the concept pass
+    # from LAYERS are pooled over every mask (LayerNorm per block, learned block
+    # weights, MLP) and compared by cosine similarity with a class-agnostic
+    # projection of the concept text embeddings. Trained next to the concept
+    # classifier (needs LORA.ENABLED; same segments, same targets, in "gt_masks"
+    # and "joint" mode); at inference the two are ensembled geometrically:
+    # p ∝ p_concept^(1 - ENSEMBLE_ALPHA) * p_head^ENSEMBLE_ALPHA.
+    cfg.MODEL.CONCEPT.MASK_HEAD = CN()
+    cfg.MODEL.CONCEPT.MASK_HEAD.ENABLED = False
+    cfg.MODEL.CONCEPT.MASK_HEAD.LAYERS = [2, 3, 4]
+    cfg.MODEL.CONCEPT.MASK_HEAD.EMBED_DIM = 768
+    cfg.MODEL.CONCEPT.MASK_HEAD.HIDDEN_DIM = 1024
+    # "linear" (less prone to overfitting the training vocabulary) or "mlp".
+    cfg.MODEL.CONCEPT.MASK_HEAD.TEXT_PROJ = "linear"
+    cfg.MODEL.CONCEPT.MASK_HEAD.INIT_LOGIT_SCALE = 20.0
+    cfg.MODEL.CONCEPT.MASK_HEAD.DROPOUT = 0.0
+    cfg.MODEL.CONCEPT.MASK_HEAD.LOSS_WEIGHT = 1.0
+    # 0 = concept classifier only, 1 = mask head only.
+    cfg.MODEL.CONCEPT.MASK_HEAD.ENSEMBLE_ALPHA = 0.5
+    # Low-rank adapters on the image stream (qkv_x / proj_x of every block the
+    # concept pass runs), in the concept-scoring pass only: the side adapter's
+    # clean-image pass keeps the frozen features. Gradients then flow through
+    # the image tokens of every block, so memory grows with depth and batch size;
+    # GRAD_CHECKPOINT recomputes the blocks in backward. Needs LORA.ENABLED.
+    cfg.MODEL.CONCEPT.IMAGE_LORA = CN()
+    cfg.MODEL.CONCEPT.IMAGE_LORA.ENABLED = False
+    cfg.MODEL.CONCEPT.IMAGE_LORA.RANK = 16
+    cfg.MODEL.CONCEPT.IMAGE_LORA.ALPHA = 16.0
+    cfg.MODEL.CONCEPT.IMAGE_LORA.GRAD_CHECKPOINT = True
     # Diagnostic: ignore the masks and output the per-patch class probabilities as
     # the segmentation, to measure the concept scores on their own.
     cfg.MODEL.CONCEPT.PIXEL_BASELINE = False

@@ -1,0 +1,18 @@
+# Mask-quality ceiling: every predicted mask gets the GT class it overlaps best,
+# so mIoU only measures the class-agnostic masks. Also logs mean best IoU,
+# recall@0.5/0.75 per GT segment and objects per image ("mask_stats").
+# Use the weights of a run that trained the side adapter (e.g. the joint run):
+#   python train_net.py --config-file configs/san_pixeldit_mask_oracle.yaml --num-gpus 1 \
+#     --eval-only MODEL.WEIGHTS output_joint/model_final.pth OUTPUT_DIR output_oracle
+# The concept modules of that checkpoint are not built here; their weights are
+# reported as unused by the checkpointer, which is expected.
+_BASE_: san_clip_vit_res4_coco.yaml
+MODEL:
+  SAN:
+    ORACLE_CLASSES:
+      ENABLED: True
+      ASSIGNMENT: "max_iou"
+      WEIGHT_BY_OBJECTNESS: True
+      MASK_STATS: True
+  CONCEPT:
+    ENABLED: False

@@ -1,0 +1,23 @@
+# Deeper concept classifier + mask head on top of a trained side adapter.
+# The masks are kept as they are (oracle: VOC 92 / ADE 50 mIoU); only the
+# classification path is retrained, reading PixelDiT blocks 8-22 instead of 1-4.
+# Trains on ground-truth segments with the side adapter frozen (TRAIN_MODE
+# gt_masks), evaluates on the side adapter's predicted masks (GT_MASKS False).
+# Start from the joint checkpoint so the side adapter is loaded; the concept
+# LoRA blocks 5-22 and the new head layers start fresh (shape mismatches are
+# skipped by the checkpointer, with a warning).
+#   train: python train_net.py --config-file configs/san_pixeldit_concept_deep.yaml --num-gpus 1 \
+#            MODEL.WEIGHTS output_maskhead/model_final.pth OUTPUT_DIR output_deep
+_BASE_: san_pixeldit_concept_maskhead.yaml
+MODEL:
+  CONCEPT:
+    GT_MASKS: False
+    LAYERS: [8, 10, 12, 14, 16, 18, 20, 22]
+    LORA:
+      TRAIN_MODE: "gt_masks"
+    MASK_HEAD:
+      LAYERS: [10, 14, 18, 22]
+      # The head alone beat the ensemble in training (50.8% vs 48.4%).
+      ENSEMBLE_ALPHA: 0.8
+SOLVER:
+  MAX_ITER: 10000
