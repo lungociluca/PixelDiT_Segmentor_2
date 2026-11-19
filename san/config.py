@@ -31,10 +31,13 @@ def add_san_config(cfg):
     # Gradient accumulation: micro-batches per optimizer step. Each step sees
     # IMS_PER_BATCH * GRAD_ACCUM_STEPS images; MAX_ITER counts optimizer steps.
     cfg.SOLVER.GRAD_ACCUM_STEPS = 1
-    # Autocast dtype when SOLVER.AMP.ENABLED: "float16" (uses a GradScaler) or
-    # "bfloat16" (no scaler needed; falls back to float16 if the GPU lacks bf16).
-    # The frozen PixelDiT weights are stored in this dtype too.
-    cfg.SOLVER.AMP.PRECISION = "float16"
+    # Training dtype: "float32" (default; no autocast), "float16" (autocast + GradScaler)
+    # or "bfloat16" (autocast, no scaler). The frozen PixelDiT weights are stored in
+    # this dtype too.
+    cfg.SOLVER.AMP.PRECISION = "float32"
+    # Used instead of bfloat16 on GPUs without native bf16 (pre-Ampere, e.g. RTX 20xx):
+    # "float32" (default; AMP off) or "float16" (faster, but may overflow to inf/NaN).
+    cfg.SOLVER.AMP.BF16_FALLBACK = "float32"
 
     # san
     cfg.MODEL.SAN = CN()

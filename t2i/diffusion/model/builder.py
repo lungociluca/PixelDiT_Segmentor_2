@@ -15,6 +15,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Modified from https://github.com/NVlabs/Sana
 
+import os
+
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers import logging as transformers_logging
@@ -78,6 +80,25 @@ def build_model(cfg, use_grad_checkpoint=False, use_fp32_attention=False, gc_ste
     return model
 
 
+def resolve_text_encoder_device(device="cuda"):
+    """Where to run the (frozen, init-only) text encoder.
+
+    Gemma-2 must run in bf16 or fp32: in fp16 its activations overflow to inf/NaN.
+    On GPUs without native bf16 (pre-Ampere, e.g. RTX 2060, compute capability < 8)
+    bf16 is only emulated, and in fp32 the 2.6B-parameter encoder (~10.5 GB) does not
+    fit next to PixelDiT. It is only used once at start-up to embed a couple of
+    prompts, so there we run it on the CPU in bf16 (same numerics as the reference).
+    Override with the env var PIXDIT_TEXT_ENCODER_DEVICE (e.g. "cuda" or "cpu").
+    """
+    override = os.environ.get("PIXDIT_TEXT_ENCODER_DEVICE")
+    if override:
+        return override
+    if str(device).startswith("cuda") and torch.cuda.is_available():
+        if torch.cuda.get_device_capability()[0] < 8:
+            return "cpu"
+    return device
+
+
 def get_tokenizer_and_text_encoder(name="gemma-2-2b-it", device="cuda"):
     text_encoder_dict = {
         "gemma-2b": "google/gemma-2b",
@@ -93,7 +114,8 @@ def get_tokenizer_and_text_encoder(name="gemma-2-2b-it", device="cuda"):
     if "gemma" in name or "Qwen" in name:
         tokenizer = AutoTokenizer.from_pretrained(text_encoder_dict[name])
         tokenizer.padding_side = "right"
-        print(f"loading text encoder from {text_encoder_dict[name]}")
+        device = resolve_text_encoder_device(device)
+        print(f"loading text encoder from {text_encoder_dict[name]} (bf16, on {device})")
         text_encoder = (
             AutoModelForCausalLM.from_pretrained(text_encoder_dict[name], torch_dtype=torch.bfloat16)
             .get_decoder()

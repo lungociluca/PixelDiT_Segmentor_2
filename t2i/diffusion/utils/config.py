@@ -46,7 +46,7 @@ class ModelConfig(BaseConfig):
     model: str = "PixDiTTrainer"
     teacher: Optional[str] = None
     image_size: int = 512
-    mixed_precision: str = "fp16"  # ['fp16', 'fp32', 'bf16']
+    mixed_precision: str = "fp32"  # ['fp16', 'fp32', 'bf16']
     fp32_attention: bool = True
     load_from: Optional[str] = None
     discriminator_model: Optional[str] = None

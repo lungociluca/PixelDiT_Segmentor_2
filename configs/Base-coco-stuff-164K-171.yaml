@@ -21,9 +21,12 @@ SOLVER:
     NORM_TYPE: 2.0
   AMP:
     ENABLED: True
-    # PixelDiT was trained in bf16; falls back to float16 on GPUs without bf16 (pre-Ampere).
-    # Also the dtype the frozen backbone weights are stored in.
-    PRECISION: "bfloat16"
+    # "float32" (default, no autocast), "float16" or "bfloat16". Also the dtype the
+    # frozen backbone weights are stored in. PixelDiT was trained in bf16, so
+    # "bfloat16" is the faster option on Ampere+ GPUs.
+    PRECISION: "float32"
+    # Used instead of bfloat16 on pre-Ampere GPUs (RTX 20xx): "float32" or "float16".
+    BF16_FALLBACK: "float32"
 INPUT:
   MIN_SIZE_TRAIN: !!python/object/apply:eval ["[int(x * 0.1 * 1024) for x in range(10, 16)]"]
   MIN_SIZE_TRAIN_SAMPLING: "choice"

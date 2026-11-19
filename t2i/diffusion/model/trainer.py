@@ -108,7 +108,9 @@ class PixDiTTrainer(nn.Module):
 
     def forward(self, x, timestep, y, mask=None, data_info=None, repa_tokens=None, segment_data=None, **kwargs):
         x = x.to(self.dtype)
-        timestep = timestep.to(self.dtype)
+        # Keep the timestep in fp32: the timestep embedding is computed in fp32, and
+        # rounding t*1000 to bf16/fp16 first loses precision (bf16: 999 -> 1000).
+        timestep = timestep.float()
         if y.dim() == 4:
             y_proc = y.squeeze(1)
         elif y.dim() == 3:
@@ -164,7 +166,7 @@ class PixDiTTrainer(nn.Module):
         return out
 
     def forward_prompts(self, timestep, y, mask=None, data_info=None, repa_tokens=None, segment_data=None, **kwargs):
-        timestep = timestep.to(self.dtype)
+        timestep = timestep.float()
         if y.dim() == 4:
             y_proc = y.squeeze(1)
         elif y.dim() == 3:
@@ -190,6 +192,8 @@ class PixDiTTrainer(nn.Module):
 
     @property
     def dtype(self):
-        return next(self.parameters()).dtype
+        # Dtype of the backbone's matmul weights (the frozen weights are stored in the
+        # autocast dtype). Not next(self.parameters()): some tensors may be kept in fp32.
+        return self.core.s_embedder.proj.weight.dtype
 
 

@@ -265,7 +265,10 @@ class PixDiT_T2I(nn.Module):
         pos = self.fetch_pos(Hs, Ws, x.device)
         x_patches = torch.nn.functional.unfold(x, kernel_size=self.patch_size, stride=self.patch_size).transpose(1, 2)
 
-        t_emb = self.t_embedder(t.view(-1)).view(B, -1, self.hidden_size)
+        t = t.reshape(-1)
+        if t.numel() == 1:
+            t = t.expand(B)  # one scalar timestep shared by the whole batch
+        t_emb = self.t_embedder(t).view(B, -1, self.hidden_size)
 
         if y.dim() != 3:
             raise ValueError("Text embedding y must be [B, L, D]")

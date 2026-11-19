@@ -1,3 +1,4 @@
+import logging
 from typing import List
 
 import open_clip
@@ -117,18 +118,10 @@ def get_model():
     weight_dtype = get_weight_dtype(config.model.mixed_precision)
     logger.info(f"Inference with {weight_dtype}, guidance_type: {guidance_type}, flow_shift: {flow_shift}")
 
+    # May be on the CPU (pre-Ampere GPUs, see resolve_text_encoder_device).
     tokenizer, text_encoder = get_tokenizer_and_text_encoder(name=config.text_encoder.text_encoder_name, device=device)
     for param in text_encoder.parameters():
         param.requires_grad = False
-
-    null_caption_token = tokenizer(
-        args.negative_prompt if hasattr(args, "negative_prompt") and len(args.negative_prompt) > 0 else "",
-        max_length=max_sequence_length,
-        padding="max_length",
-        truncation=True,
-        return_tensors="pt",
-    ).to(device)
-    null_caption_embs = text_encoder(null_caption_token.input_ids, null_caption_token.attention_mask, use_cache=False)[0]
 
     # model setting
     model_kwargs = model_init_config(config, latent_size=latent_size)
@@ -181,10 +174,12 @@ class SAN(nn.Module):
         self.model, self.tokenizer, self.text_encoder = get_model()
 
         # The diffusion model is always conditioned on the dataset-agnostic default prompt.
-        default_emb, default_mask, default_tokens = self.embed_condition([local_config.default_prompt])
-        self.default_emb = default_emb.to(torch.float32)      # (1, 1, 300, D)
-        self.default_emb_mask = default_mask                  # (1, 300)
-        self.default_tokens_count = default_tokens[0]
+        with torch.no_grad():
+            default_emb, default_mask, default_tokens = self.embed_condition([local_config.default_prompt])
+        dev = local_config.device
+        self.default_emb = default_emb.to(dev, torch.float32)  # (1, 1, 300, D)
+        self.default_emb_mask = default_mask.to(dev)           # (1, 300)
+        self.default_tokens_count = default_tokens[0].to(dev)
 
         # Class names per dataset (order = contiguous GT class ids).
         self.default_dataset = train_dataset_names[0]
@@ -201,9 +196,24 @@ class SAN(nn.Module):
         # embeddings that need fp32 should be computed above, before this cast.
         self.amp_dtype = amp_dtype
         if amp_dtype is not None:
-            for p in self.model.parameters():
-                if not p.requires_grad:
-                    p.data = p.data.to(amp_dtype)
+            # PixelDiT was trained in bf16 (fp32 range). In fp16 (the fallback on
+            # pre-Ampere GPUs) a weight beyond +-65504 would become inf, so such
+            # tensors are kept in fp32; autocast still runs their ops in fp16.
+            limit = torch.finfo(amp_dtype).max
+            kept_fp32 = []
+            for name, p in self.model.named_parameters():
+                if p.requires_grad:
+                    continue
+                if amp_dtype == torch.float16 and p.detach().abs().max().item() > limit:
+                    kept_fp32.append(name)
+                    continue
+                p.data = p.data.to(amp_dtype)
+            if kept_fp32:
+                logging.getLogger("san").warning(
+                    "Kept %d PixelDiT tensors in fp32 (values exceed the fp16 range): %s",
+                    len(kept_fp32), kept_fp32,
+                )
+        if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
         # TODO: build the segmentation head here.
@@ -262,9 +272,11 @@ class SAN(nn.Module):
     
     def embed_condition(self, prompts, with_chi_window=False):
         max_length = 506 if with_chi_window else 300
+        # The text encoder may live on the CPU (pre-Ampere GPUs); feed it there.
+        encoder_device = next(self.text_encoder.parameters()).device
         caption_token = self.tokenizer(
             prompts, max_length=max_length, padding="max_length", truncation=True, return_tensors="pt"
-        ).to(local_config.device)
+        ).to(encoder_device)
         select_index = [0] + list(range(-300 + 1, 0)) if with_chi_window else list(range(300))
         caption_embs_list = [self.text_encoder(caption_token.input_ids[[i]], caption_token.attention_mask[[i]])[0][:, None][
             :, :, select_index

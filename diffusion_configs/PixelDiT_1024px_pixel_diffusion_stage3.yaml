@@ -20,7 +20,7 @@ data:
 model:
   model: PixDiTTrainer  # PixelDiT wrapper
   image_size: 1024
-  mixed_precision: "bf16"  # float32 to be safe initially
+  mixed_precision: "fp32"
   fp32_attention: true
   load_from:
   resume_from:
