@@ -76,6 +76,15 @@ def add_san_config(cfg):
     # Masks whose best match has IoU (or covered fraction, for "majority") below
     # this value are treated as "no object" and contribute nothing.
     cfg.MODEL.SAN.ORACLE_CLASSES.MIN_SCORE = 0.0
+    # Prompt the frozen PixelDiT is conditioned on when extracting features.
+    # None = t2i.config.default_prompt. "" = the empty prompt, i.e. the model's
+    # own unconditional (CFG-null) embedding. Set from the command line with
+    # --prompt "..." or MODEL.SAN.PROMPT "...".
+    cfg.MODEL.SAN.PROMPT = None
+    # Mask the prompt's padding tokens out of the joint attention. Upstream
+    # PixelDiT never did this (its trainer dropped the mask), so False reproduces
+    # the pretraining behaviour exactly.
+    cfg.MODEL.SAN.MASK_TEXT_PADDING = True
     # side adapter
     cfg.MODEL.SIDE_ADAPTER = CN()
     cfg.MODEL.SIDE_ADAPTER.NAME = "RegionwiseSideAdapterNetwork"

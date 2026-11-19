@@ -89,6 +89,10 @@ class PixDiTTrainer(nn.Module):
             pit_adaln_post_modulation=pit_adaln_post_modulation,
         )
 
+        # If True, forward() passes the text attention mask to the core so image
+        # tokens do not attend to prompt padding. Set by SAN from the config.
+        self.mask_text_padding = bool(extra.get("mask_text_padding", False))
+
         self.image_size = int(image_size)
         self.patch_size = patch_size
         self.pred_sigma = bool(pred_sigma)
@@ -128,7 +132,12 @@ class PixDiTTrainer(nn.Module):
         if hasattr(self.core, "last_repa_tokens"):
             self.core.last_repa_tokens = None
 
-        out = self.core(x, timestep, y_proc, s=None, mask=None, segment_data=segment_data)
+        # Upstream PixelDiT always passed mask=None here, so the released checkpoint
+        # was trained with image tokens attending to the text padding. Masking the
+        # padding is a (small) change of input distribution; toggle it with
+        # MODEL.SAN.MASK_TEXT_PADDING to compare.
+        core_mask = mask if self.mask_text_padding else None
+        out = self.core(x, timestep, y_proc, s=None, mask=core_mask, segment_data=segment_data)
         repa_loss = None
         if repa_tokens is not None:
             repa_tokens = repa_tokens.to(self.dtype)

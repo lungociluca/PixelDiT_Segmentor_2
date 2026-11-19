@@ -191,6 +191,10 @@ def setup(args):
     add_san_config(cfg)
     cfg.merge_from_file(args.config_file)
     cfg.merge_from_list(args.opts)
+    if getattr(args, "prompt", None) is not None:
+        # Done after merge_from_list so that --prompt "" really is the empty
+        # string (passing "" through opts is fragile in the shell).
+        cfg.MODEL.SAN.PROMPT = args.prompt
     cfg.freeze()
     default_setup(cfg, args)
     if not args.eval_only:
@@ -221,7 +225,14 @@ def main(args):
 
 
 if __name__ == "__main__":
-    args = default_argument_parser().parse_args()
+    parser = default_argument_parser()
+    parser.add_argument(
+        "--prompt",
+        default=None,
+        help='Prompt the frozen PixelDiT is conditioned on. Omit for '
+        't2i.config.default_prompt; use --prompt "" for the unconditional embedding.',
+    )
+    args = parser.parse_args()
     print("Command Line Args:", args)
     launch(
         main,

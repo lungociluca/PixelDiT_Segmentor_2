@@ -15,6 +15,7 @@ from typing import Optional
 import pyrallis
 from argparse import Namespace
 import json
+import os
 
 from .criterion import SetCriterion
 from .matcher import HungarianMatcher
@@ -42,13 +43,41 @@ def get_dataset_labels(dataset_name: str) -> List[str]:
       2. MetadataCatalog stuff_classes (falls back to thing_classes)
     The order must match the contiguous class ids of that dataset's GT masks.
     """
-    overrides = getattr(local_config, "label_json_overrides", {}) or {}
-    if dataset_name in overrides:
-        with open(overrides[dataset_name]) as f:
-            return [x for x in json.load(f) if x != "unknown"]
     meta = MetadataCatalog.get(dataset_name)
     classes = meta.stuff_classes if hasattr(meta, "stuff_classes") else meta.thing_classes
-    return [c.strip() for c in classes]
+    meta_classes = [c.strip() for c in classes]
+
+    overrides = getattr(local_config, "label_json_overrides", {}) or {}
+    path = overrides.get(dataset_name)
+    if path is None:
+        return meta_classes
+
+    log = logging.getLogger("san")
+    if not os.path.isfile(path):
+        # The catseg JSONs are gitignored (*.json), so a fresh clone does not have them.
+        log.warning(
+            "Class-name file %s for %s not found; using the detectron2 names instead "
+            "(e.g. %r). Any unseen-class list must use these names.",
+            path, dataset_name, meta_classes[:3],
+        )
+        return meta_classes
+
+    with open(path) as f:
+        names = [x.strip() for x in json.load(f) if x != "unknown"]
+    if len(names) != len(meta_classes):
+        raise ValueError(
+            f"{path} has {len(names)} class names but {dataset_name} has "
+            f"{len(meta_classes)} classes; the order must match the GT class ids."
+        )
+    renamed = [(a, b) for a, b in zip(meta_classes, names) if a != b]
+    if renamed:
+        log.info(
+            "%s: %d class names from %s differ from detectron2's, e.g. %s. "
+            "Any unseen-class list must use the JSON names.",
+            dataset_name, len(renamed), path,
+            ", ".join(f"{a!r}->{b!r}" for a, b in renamed[:5]),
+        )
+    return names
 
 @dataclass
 class PixelDiTInference(PixDiTConfig):
@@ -159,6 +188,8 @@ class SAN(nn.Module):
         oracle_assignment: str = "max_iou",
         oracle_mask_threshold: float = 0.5,
         oracle_min_score: float = 0.0,
+        prompt: Optional[str] = None,
+        mask_text_padding: bool = True,
     ):
         super().__init__()
         self.size_divisibility = 16
@@ -172,10 +203,22 @@ class SAN(nn.Module):
         self.oracle_min_score = oracle_min_score
 
         self.model, self.tokenizer, self.text_encoder = get_model()
+        self.model.mask_text_padding = bool(mask_text_padding)
 
-        # The diffusion model is always conditioned on the dataset-agnostic default prompt.
+        # The diffusion model is conditioned on one dataset-agnostic prompt
+        # (MODEL.SAN.PROMPT; None -> t2i.config.default_prompt, "" -> unconditional).
+        self.prompt = local_config.default_prompt if prompt is None else prompt
         with torch.no_grad():
-            default_emb, default_mask, default_tokens = self.embed_condition([local_config.default_prompt])
+            default_emb, default_mask, default_tokens = self.embed_condition([self.prompt])
+        logging.getLogger("san").info(
+            "PixelDiT conditioning prompt (%d tokens, padding %s): %r",
+            int(default_tokens[0]), "masked" if mask_text_padding else "attended", self.prompt,
+        )
+        if self.prompt and int(default_tokens[0]) >= default_mask.shape[-1]:
+            logging.getLogger("san").warning(
+                "The conditioning prompt fills all %d text tokens and was truncated.",
+                default_mask.shape[-1],
+            )
         dev = local_config.device
         self.default_emb = default_emb.to(dev, torch.float32)  # (1, 1, 300, D)
         self.default_emb_mask = default_mask.to(dev)           # (1, 300)
@@ -268,6 +311,8 @@ class SAN(nn.Module):
             "oracle_assignment": cfg.MODEL.SAN.ORACLE_CLASSES.ASSIGNMENT,
             "oracle_mask_threshold": cfg.MODEL.SAN.ORACLE_CLASSES.MASK_THRESHOLD,
             "oracle_min_score": cfg.MODEL.SAN.ORACLE_CLASSES.MIN_SCORE,
+            "prompt": cfg.MODEL.SAN.PROMPT,
+            "mask_text_padding": cfg.MODEL.SAN.MASK_TEXT_PADDING,
         }
     
     def embed_condition(self, prompts, with_chi_window=False):

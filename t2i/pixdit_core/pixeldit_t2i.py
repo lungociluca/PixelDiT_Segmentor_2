@@ -289,15 +289,22 @@ class PixDiT_T2I(nn.Module):
             pos_txt = self.fetch_pos_text(Ltxt, x.device) if self.use_text_rope else None
             attn_mask_joint = None
             if mask is not None and isinstance(mask, torch.Tensor):
+                # Text attention mask (1 = real token, 0 = padding), shape [B|1, L]
+                # or [B|1, 1, 1, L]. F.scaled_dot_product_attention treats a boolean
+                # True as "may attend", so build a keep-mask: real text tokens and
+                # all image tokens are True, text padding is False. Only keys are
+                # masked, so every query row still has unmasked keys (no NaNs).
                 m = mask
                 while m.dim() > 2 and m.size(1) == 1:
                     m = m.squeeze(1)
-                if m.dim() == 3 and m.size(1) == 1:
-                    m = m.squeeze(1)
-                if m.dim() == 2:
-                    pad = (m == 0)
-                    pad_img = torch.zeros((B, L), dtype=torch.bool, device=x.device)
-                    attn_mask_joint = torch.cat([pad[:, :Ltxt], pad_img], dim=1).view(B, 1, 1, Ltxt + L)
+                if m.dim() != 2:
+                    raise ValueError(f"Unexpected text mask shape {tuple(mask.shape)}")
+                keep_txt = (m[:, :Ltxt] != 0).to(x.device)
+                if keep_txt.size(0) != B:
+                    # One prompt shared by the whole batch (y_emb is expanded above).
+                    keep_txt = keep_txt.expand(B, -1)
+                keep_img = torch.ones((B, L), dtype=torch.bool, device=x.device)
+                attn_mask_joint = torch.cat([keep_txt, keep_img], dim=1).view(B, 1, 1, Ltxt + L)
             self.last_repa_tokens = None
             s = s0
 
