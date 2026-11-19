@@ -26,6 +26,7 @@ from .concept_classifier import (
     reduce_synonyms,
 )
 from .criterion import SetCriterion
+from .prompt_learner import ImplicitCaptioner, PromptLearner
 from .matcher import HungarianMatcher
 from .side_adapter import build_side_adapter_network
 from ..utils.amp import resolve_amp_dtype, resolve_backbone_dtype
@@ -222,6 +223,16 @@ class SAN(nn.Module):
         image_lora_alpha: float = 16.0,
         image_lora_grad_checkpoint: bool = True,
         oracle_mask_stats: bool = True,
+        prompt_learner: bool = False,
+        prompt_layer: int = -1,
+        prompt_span: str = "all",
+        prompt_num_tokens: int = 16,
+        prompt_implicit: bool = False,
+        prompt_implicit_dim: int = 512,
+        prompt_implicit_depth: int = 2,
+        prompt_implicit_num_heads: int = 8,
+        prompt_implicit_pool_size: int = 16,
+        prompt_implicit_dropout: float = 0.0,
     ):
         super().__init__()
         self.size_divisibility = 16
@@ -294,6 +305,27 @@ class SAN(nn.Module):
         self.image_lora_grad_checkpoint = image_lora_grad_checkpoint
         # Deepest PixelDiT block the concept pass has to run.
         self.concept_depth = max(self.concept_layers + self.mask_head_layers) if concept_enabled else 0
+
+        # Learnable language embeddings for one block of the concept pass
+        # (MODEL.PROMPT_LEARNER), built below once the model is loaded.
+        if prompt_learner and not concept_lora:
+            raise ValueError(
+                "MODEL.PROMPT_LEARNER is trained with the concept classifier and needs "
+                "MODEL.CONCEPT.LORA.ENABLED (and MODEL.CONCEPT.ENABLED)."
+            )
+        if prompt_span not in ("all", "append"):
+            raise ValueError(f"MODEL.PROMPT_LEARNER.SPAN must be 'all' or 'append', got {prompt_span!r}")
+        if prompt_implicit and not prompt_learner:
+            raise ValueError("MODEL.PROMPT_LEARNER.IMPLICIT.ENABLED needs MODEL.PROMPT_LEARNER.ENABLED.")
+        self.prompt_layer = 0
+        if prompt_learner:
+            self.prompt_layer = self.concept_layers[-1] if prompt_layer < 0 else int(prompt_layer)
+            if not 1 <= self.prompt_layer <= self.concept_layers[-1]:
+                raise ValueError(
+                    f"MODEL.PROMPT_LEARNER.LAYER {self.prompt_layer} must lie in 1..{self.concept_layers[-1]} "
+                    "(the last of MODEL.CONCEPT.LAYERS) to change the concept scores."
+                )
+        self.prompt_learner = None
         self.oracle_mask_stats = oracle_mask_stats
         # dataset_name -> [sum of best IoU, GT segments, recalled @0.5, @0.75, masks kept, images]
         self.oracle_stats = {}
@@ -333,6 +365,35 @@ class SAN(nn.Module):
         self.default_emb = default_emb.to(torch.float32)      # (1, 1, 300, D)
         self.default_emb_mask = default_mask                  # (1, 300)
         self.default_tokens_count = default_tokens[0]
+
+        if prompt_learner:
+            text_length = self.default_emb.shape[2]
+            if prompt_span == "all":
+                start, num_tokens = 0, text_length
+            else:
+                start, num_tokens = int(self.default_tokens_count), int(prompt_num_tokens)
+            hidden_size = self.model.core.hidden_size
+            captioner = None
+            if prompt_implicit:
+                captioner = ImplicitCaptioner(
+                    in_dim=hidden_size,
+                    out_dim=hidden_size,
+                    num_tokens=num_tokens,
+                    dim=prompt_implicit_dim,
+                    depth=prompt_implicit_depth,
+                    num_heads=prompt_implicit_num_heads,
+                    pool_size=prompt_implicit_pool_size,
+                    dropout=prompt_implicit_dropout,
+                )
+            self.prompt_learner = PromptLearner(
+                hidden_size, text_length, start, num_tokens, captioner=captioner
+            ).to(local_config.device)
+            get_root_logger().info(
+                f"Prompt learner: delta on the text input of PixelDiT block {self.prompt_layer} (concept pass "
+                f"only), text positions [{start}, {start + num_tokens}), implicit captioner "
+                f"{'on' if prompt_implicit else 'off'}, "
+                f"{sum(p.numel() for p in self.prompt_learner.parameters()) / 1e6:.2f}M params"
+            )
 
         # Class names per dataset (order = contiguous GT class ids).
         self.default_dataset = train_dataset_names[0]
@@ -558,6 +619,16 @@ class SAN(nn.Module):
             "image_lora_alpha": cfg.MODEL.CONCEPT.IMAGE_LORA.ALPHA,
             "image_lora_grad_checkpoint": cfg.MODEL.CONCEPT.IMAGE_LORA.GRAD_CHECKPOINT,
             "oracle_mask_stats": cfg.MODEL.SAN.ORACLE_CLASSES.MASK_STATS,
+            "prompt_learner": cfg.MODEL.PROMPT_LEARNER.ENABLED,
+            "prompt_layer": cfg.MODEL.PROMPT_LEARNER.LAYER,
+            "prompt_span": cfg.MODEL.PROMPT_LEARNER.SPAN,
+            "prompt_num_tokens": cfg.MODEL.PROMPT_LEARNER.NUM_TOKENS,
+            "prompt_implicit": cfg.MODEL.PROMPT_LEARNER.IMPLICIT.ENABLED,
+            "prompt_implicit_dim": cfg.MODEL.PROMPT_LEARNER.IMPLICIT.DIM,
+            "prompt_implicit_depth": cfg.MODEL.PROMPT_LEARNER.IMPLICIT.DEPTH,
+            "prompt_implicit_num_heads": cfg.MODEL.PROMPT_LEARNER.IMPLICIT.NUM_HEADS,
+            "prompt_implicit_pool_size": cfg.MODEL.PROMPT_LEARNER.IMPLICIT.POOL_SIZE,
+            "prompt_implicit_dropout": cfg.MODEL.PROMPT_LEARNER.IMPLICIT.DROPOUT,
         }
     
     def embed_condition(self, prompts, with_chi_window=False):
@@ -666,7 +737,13 @@ class SAN(nn.Module):
         if self.image_adapter is not None:
             segment_data["image_adapter"] = self.image_adapter
             segment_data["grad_checkpoint"] = self.image_lora_grad_checkpoint
+        if self.prompt_learner is not None:
+            # Learned language embeddings, added to the default prompt's text states
+            # at the input of block PROMPT_LEARNER.LAYER only.
+            segment_data["text_residual"] = self.prompt_learner.text_residual(self.prompt_layer)
         self._run_backbone(x, segment_data, timestep=t if t > 0 else None, grad=train)
+        if self.prompt_learner is not None and train:
+            self._log_prompt_stats()
         return {
             "scores": self._reduce_concept_scores(segment_data["concept_scores"], dataset_name, keep),
             "hw": segment_data["hw"],
@@ -674,6 +751,16 @@ class SAN(nn.Module):
             "features": segment_data.get("features", {}),
             "keep": keep,
         }
+
+    def _log_prompt_stats(self):
+        try:
+            from detectron2.utils.events import get_event_storage
+
+            storage = get_event_storage()
+            for k, v in self.prompt_learner.stats().items():
+                storage.put_scalar(k, v)
+        except AssertionError:
+            pass  # no event storage outside a trainer
 
     def _head_logits(self, concept_out, i, weights, dataset_name):
         """Mask-head class logits (S, K) of image i for mask weights (S, h*w) on
@@ -810,6 +897,7 @@ class SAN(nn.Module):
         share_pass = (
             use_concepts and self.concept_timestep <= 0
             and self.mask_head is None and self.image_adapter is None
+            and self.prompt_learner is None
         )
         if share_pass:
             segment_data.update(self._concept_inputs(dataset_name))

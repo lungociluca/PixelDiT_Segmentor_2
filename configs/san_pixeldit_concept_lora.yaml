@@ -21,9 +21,9 @@ MODEL:
       HOLDOUT_CLASSES: []
 SOLVER:
   BASE_LR: 0.0001
-  MAX_ITER: 49999        # optimizer steps (each = IMS_PER_BATCH * GRAD_ACCUM_STEPS images)
+  MAX_ITER: 1499        # optimizer steps (each = IMS_PER_BATCH * GRAD_ACCUM_STEPS images)
 TEST:
-  EVAL_PERIOD: 6000
+  EVAL_PERIOD: 500
 
 # voc 22.3  23.6
 # ade 15.44 17.49

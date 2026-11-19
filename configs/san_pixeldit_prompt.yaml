@@ -1,0 +1,26 @@
+# Side adapter (class-agnostic masks) trained together with learnable language
+# embeddings for the frozen PixelDiT, instead of the fixed default prompt.
+# Static tokens appended to the default prompt + an ODISE-style implicit
+# captioner that reads PixelDiT's own patch embedding (no extra pretrained model).
+#   train: python train_net.py --config-file configs/san_pixeldit_prompt.yaml --num-gpus 1 OUTPUT_DIR output_prompt
+# Static tokens only: MODEL.PROMPT_LEARNER.IMPLICIT.ENABLED False.
+_BASE_: san_clip_vit_res4_coco.yaml
+MODEL:
+  PROMPT_LEARNER:
+    ENABLED: True
+    MODE: "append"
+    NUM_TOKENS: 16
+    INIT: "text"
+    GRAD_CHECKPOINT: True
+    LR_MULTIPLIER: 1.0
+    IMPLICIT:
+      ENABLED: True
+      SOURCE_LAYER: 0
+      DIM: 512
+      DEPTH: 2
+      NUM_HEADS: 8
+      POOL_SIZE: 16
+SOLVER:
+  # Gradients now flow through the PixelDiT blocks: smaller micro-batches.
+  IMS_PER_BATCH: 8
+  GRAD_ACCUM_STEPS: 4

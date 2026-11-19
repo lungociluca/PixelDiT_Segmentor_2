@@ -23,6 +23,7 @@ def add_san_config(cfg):
         "pos_embed",
         "query_embed",
         "relative_position_bias_table",
+        "prompt_tokens",  # learned prompt delta (MODEL.PROMPT_LEARNER)
     ]
     cfg.SOLVER.OPTIMIZER = "ADAMW"
     cfg.SOLVER.BACKBONE_MULTIPLIER = 1.0
@@ -207,6 +208,35 @@ def add_san_config(cfg):
     # Diagnostic: ignore the masks and output the per-patch class probabilities as
     # the segmentation, to measure the concept scores on their own.
     cfg.MODEL.CONCEPT.PIXEL_BASELINE = False
+
+    # Learnable language embeddings for the mask-classification layer (see
+    # san/model/prompt_learner.py). Every PixelDiT block still computes the text
+    # stream from the default prompt; at the input of block LAYER only, a learned
+    # delta is added to those text states, in the concept-scoring pass. The
+    # side adapter's pass and the blocks before LAYER are unchanged. Trained
+    # with the concept classifier (needs MODEL.CONCEPT.LORA.ENABLED, "gt_masks"
+    # or "joint"). No pretrained model is added.
+    cfg.MODEL.PROMPT_LEARNER = CN()
+    cfg.MODEL.PROMPT_LEARNER.ENABLED = False
+    # PixelDiT block (1-based) whose text input gets the delta; -1 = the last of
+    # MODEL.CONCEPT.LAYERS. Must be <= that layer to affect the concept scores.
+    cfg.MODEL.PROMPT_LEARNER.LAYER = -1
+    # "all": a delta on every text position. "append": on NUM_TOKENS padding
+    # positions right after the default prompt's last real token.
+    cfg.MODEL.PROMPT_LEARNER.SPAN = "all"
+    cfg.MODEL.PROMPT_LEARNER.NUM_TOKENS = 16
+    # LR multiplier of every prompt-learner parameter (the delta starts at zero).
+    cfg.MODEL.PROMPT_LEARNER.LR_MULTIPLIER = 10.0
+    # ODISE-style implicit captioner: per-image delta predicted from the image
+    # tokens entering block LAYER (no extra pass).
+    cfg.MODEL.PROMPT_LEARNER.IMPLICIT = CN()
+    cfg.MODEL.PROMPT_LEARNER.IMPLICIT.ENABLED = False
+    cfg.MODEL.PROMPT_LEARNER.IMPLICIT.DIM = 512
+    cfg.MODEL.PROMPT_LEARNER.IMPLICIT.DEPTH = 2
+    cfg.MODEL.PROMPT_LEARNER.IMPLICIT.NUM_HEADS = 8
+    # Image tokens are average-pooled to POOL_SIZE x POOL_SIZE before the captioner.
+    cfg.MODEL.PROMPT_LEARNER.IMPLICIT.POOL_SIZE = 16
+    cfg.MODEL.PROMPT_LEARNER.IMPLICIT.DROPOUT = 0.0
 
     # PixelDiT backbone
     cfg.MODEL.PIXELDIT = CN()

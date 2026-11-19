@@ -15,7 +15,11 @@ It checks:
      into it and the learned head);
   5. the image LoRA starts as a no-op, trains through the image stream (with
      and without gradient checkpointing, same gradients), and the mask-embedding
-     head + ensemble give per-mask class probabilities with gradients.
+     head + ensemble give per-mask class probabilities with gradients;
+  6. the prompt learner (static delta + implicit captioner) starts as exactly
+     the default-prompt model, changes only the blocks from its layer on, and a
+     loss on that layer's image tokens back-propagates into the delta and the
+     captioner (never into the frozen PixelDiT).
 """
 import os
 import sys
@@ -31,6 +35,7 @@ import t2i.config as local_config
 from san.config import add_san_config
 from san.model.concept_classifier import ConceptLoRA, ConceptMaskClassifier, MaskEmbedHead, ensemble_probs
 from san.model.criterion import SetCriterion
+from san.model.prompt_learner import ImplicitCaptioner, PromptLearner
 from san.model.matcher import HungarianMatcher
 from san.model.side_adapter import build_side_adapter_network
 from san.utils.amp import resolve_amp_dtype
@@ -384,6 +389,56 @@ def check_image_lora_and_mask_head():
     print("image LoRA + mask head: ok")
 
 
+def check_prompt_learner():
+    local_config.layer_count = 3
+    D, L, hidden = 32, 12, 96
+    core = PixDiT_T2I(
+        hidden_size=hidden, num_groups=4, patch_depth=14, txt_embed_dim=D, txt_max_length=L
+    ).to(device).eval()
+    core.requires_grad_(False)
+    B = 2
+    x = torch.randn(B, 3, 128, 96, device=device)
+    t = torch.full((B,), 2.0, device=device)
+    y = torch.randn(1, L, D, device=device)
+    with torch.no_grad():
+        ref = {"feature_layers": [1, 2, 3]}
+        core(x, t, y, segment_data=ref)
+
+    for start, n in [(0, L), (5, 4)]:  # SPAN "all" / "append"
+        cap = ImplicitCaptioner(hidden, hidden, num_tokens=n, dim=32, depth=1, num_heads=4, pool_size=4).to(device)
+        pl = PromptLearner(hidden, L, start, n, captioner=cap).to(device)
+        # Zero init: exactly the default-prompt model.
+        with torch.no_grad():
+            seg = {"feature_layers": [1, 2, 3], "text_residual": pl.text_residual(2)}
+            core(x, t, y, segment_data=seg)
+        for k in (1, 2, 3):
+            assert torch.allclose(seg["features"][k], ref["features"][k], atol=1e-5), k
+
+        seg = {"feature_layers": [1, 2], "text_residual": pl.text_residual(2)}
+        core(x, t, y, segment_data=seg)
+        assert not seg["features"][1].requires_grad, "block 1 must not see the learned delta"
+        seg["features"][2].float().pow(2).mean().backward()
+        assert pl.prompt_tokens.grad is not None and pl.prompt_tokens.grad.abs().sum() > 0
+        assert cap.out_proj.weight.grad is not None and cap.out_proj.weight.grad.abs().sum() > 0
+        assert all(p.grad is None for p in core.parameters()), "frozen PixelDiT got gradients"
+
+        # A non-zero delta changes block 2 onwards, never block 1.
+        with torch.no_grad():
+            pl.prompt_tokens.normal_()
+            seg = {"feature_layers": [1, 2], "text_residual": pl.text_residual(2)}
+            core(x, t, y, segment_data=seg)
+        assert torch.allclose(seg["features"][1], ref["features"][1], atol=1e-5)
+        assert not torch.allclose(seg["features"][2], ref["features"][2], atol=1e-3)
+
+    # A per-image condition of the wrong batch size is rejected.
+    try:
+        core(x, t, y.expand(3, -1, -1), segment_data={"feature_layers": [1]})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("condition batch mismatch not caught")
+    print("prompt learner: ok")
+
 @torch.no_grad()
 def seg_features(core, x, t, y, base, img):
     seg = dict(base, image_adapter=img)
@@ -396,5 +451,6 @@ if __name__ == "__main__":
     check_concept_stream()
     check_concept_lora()
     check_image_lora_and_mask_head()
+    check_prompt_learner()
     check_side_adapter()
     print("all checks passed")

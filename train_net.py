@@ -195,6 +195,8 @@ class Trainer(DefaultTrainer):
                 weight_decay = cfg.SOLVER.WEIGHT_DECAY
                 if "side_adapter_network" in module_name:
                     lr = lr * cfg.SOLVER.BACKBONE_MULTIPLIER
+                if "prompt_learner" in module_name.split("."):
+                    lr = lr * cfg.MODEL.PROMPT_LEARNER.LR_MULTIPLIER
                 if any(x in param_name for x in embed_names):
                     weight_decay = cfg.SOLVER.WEIGHT_DECAY_EMBED
                 if isinstance(module, norm_module_types):

@@ -382,7 +382,13 @@ class PixDiT_T2I(nn.Module):
                 proj.bias.float() if proj.bias is not None else None,
             )
             y_emb = self.y_embedder.norm(y_emb)
-        y_emb = y_emb.to(x.dtype).view(1, Ltxt, self.hidden_size).expand((B, -1, -1))
+        # One condition shared by the batch (1, Ltxt, hidden), or one per image
+        # (B, Ltxt, hidden), e.g. from the implicit captioner of the prompt learner.
+        y_emb = y_emb.to(x.dtype).view(-1, Ltxt, self.hidden_size)
+        if y_emb.shape[0] == 1:
+            y_emb = y_emb.expand((B, -1, -1))
+        elif y_emb.shape[0] != B:
+            raise ValueError(f"text condition batch {y_emb.shape[0]} is neither 1 nor the image batch {B}")
         y_emb = y_emb + self.y_pos_embedding[:, :Ltxt, :].to(y_emb.dtype)
 
         condition = torch.nn.functional.silu(t_emb)
@@ -414,9 +420,13 @@ class PixDiT_T2I(nn.Module):
         # Optional low-rank update of the image stream (concept-scoring pass only).
         image_adapter = segment_data.get("image_adapter") if segment_data is not None else None
         # Recompute block activations in backward when gradients flow through the
-        # image stream (otherwise every block's 4096-token activations are kept).
-        ckpt = image_adapter is not None and torch.is_grad_enabled() and bool(
-            segment_data.get("grad_checkpoint", True)
+        # image stream (otherwise every block's 4096-token activations are kept):
+        # with the image adapter (default on), or when the caller asks for it
+        # (segment_data["grad_checkpoint"], e.g. for a learned text condition).
+        ckpt = (
+            segment_data is not None
+            and torch.is_grad_enabled()
+            and bool(segment_data.get("grad_checkpoint", image_adapter is not None))
         )
 
         def run_block(i, *args, **kwargs):
@@ -449,6 +459,18 @@ class PixDiT_T2I(nn.Module):
                 features = {}
             patch_features = []
 
+        # Optional learned text residual (san.model.prompt_learner): segment_data[
+        # "text_residual"] = {"layer": k, "fn": f}, f(image_tokens, (Hs, Ws)) ->
+        # (1 or B, Ltxt, hidden), added to the text stream at the input of block k.
+        text_residual = segment_data.get("text_residual") if segment_data is not None else None
+        text_residual_layer = None
+        if text_residual is not None:
+            text_residual_layer = int(text_residual["layer"])
+            if not 1 <= text_residual_layer <= num_blocks:
+                raise ValueError(
+                    f"text_residual layer {text_residual_layer} must lie in 1..{num_blocks} (the blocks run)"
+                )
+
         if s is None:
             s0 = self.s_embedder(x_patches)
             pos_txt = self.fetch_pos_text(Ltxt, x.device) if self.use_text_rope else None
@@ -469,6 +491,11 @@ class PixDiT_T2I(nn.Module):
                 features[0] = s0
 
             for i in range(num_blocks):
+                if text_residual is not None and i + 1 == text_residual_layer:
+                    # Learned language embeddings for block i + 1 only: added to the
+                    # text states the previous blocks produced from the prompt. The
+                    # callable sees this block's input image tokens (B, Hs*Ws, hidden).
+                    y_emb = y_emb + text_residual["fn"](s, (Hs, Ws)).to(y_emb.dtype)
                 if c_emb is not None and i < concept_layers[-1]:
                     s, y_emb, c_emb, attn_x, attn_c = run_block(
                         i, s, y_emb, condition, pos, pos_txt, attn_mask_joint,
