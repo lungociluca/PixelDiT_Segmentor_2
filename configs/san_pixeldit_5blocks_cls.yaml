@@ -1,0 +1,44 @@
+# Bottleneck study: mask classification only, on a 5-block PixelDiT.
+#
+# PixelDiT is truncated to its first 5 patch blocks: the number of blocks built is
+# max(PIXELDIT.FEATURE_LAYERS, CONCEPT.LAYERS, CONCEPT.MASK_HEAD.LAYERS) = 5.
+# Only the classification path is trained (TRAIN_MODE gt_masks): the concept LoRA
+# on the text stream of blocks 1-5, the learned layer weights / logit scale, and
+# the mask-embedding head on the image tokens of blocks 3-5. The side adapter is
+# frozen and never run during training; ground-truth segments are the masks.
+#
+# Reading the result:
+#   - GT_MASKS True (this file): mIoU / pACC and the logged "GT-mask classification
+#     top-1" measure the classifier alone, with perfect masks.
+#   - san_pixeldit_mask_oracle.yaml measures the masks alone, with perfect classes.
+#   - GT_MASKS False: the full pipeline (side adapter masks + this classifier).
+#   Whichever of the first two sits closest to the full pipeline's mIoU is the
+#   bottleneck.
+#
+# train (from scratch; side adapter not needed):
+#   python train_net.py --config-file configs/san_pixeldit_5blocks_cls.yaml --num-gpus 1 OUTPUT_DIR output_5blocks_cls
+# train starting from a joint checkpoint instead, so the saved model also carries a
+# trained side adapter and can be evaluated on predicted masks (the 4-block concept
+# LoRA / mask-head layer weights do not match 5 blocks and are re-initialised):
+#   ... MODEL.WEIGHTS output_joint/model_final.pth OUTPUT_DIR output_5blocks_cls
+# eval on GT masks:
+#   python train_net.py --config-file configs/san_pixeldit_5blocks_cls.yaml --num-gpus 1 \
+#     --eval-only MODEL.WEIGHTS output_5blocks_cls/model_final.pth OUTPUT_DIR output_5blocks_cls_eval
+# eval on predicted masks (needs the joint-initialised run above):
+#   ... --eval-only MODEL.WEIGHTS output_5blocks_cls/model_final.pth MODEL.CONCEPT.GT_MASKS False
+# each part on its own: MODEL.CONCEPT.MASK_HEAD.ENSEMBLE_ALPHA 0.0 (concept LoRA) / 1.0 (mask head)
+_BASE_: san_pixeldit_concept_maskhead.yaml
+MODEL:
+  PIXELDIT:
+    FEATURE_LAYERS: [1, 2, 3]      # side adapter taps; must stay <= 5
+  CONCEPT:
+    LAYERS: [1, 2, 3, 4, 5]        # concept-attention scores from all 5 blocks
+    GT_MASKS: True
+    LORA:
+      ENABLED: True
+      TRAIN_MODE: "gt_masks"       # classifier only; side adapter frozen, not run
+    MASK_HEAD:
+      ENABLED: True
+      LAYERS: [3, 4, 5]
+    IMAGE_LORA:
+      ENABLED: False               # keep the image stream frozen

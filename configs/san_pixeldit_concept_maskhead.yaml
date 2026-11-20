@@ -16,4 +16,4 @@ MODEL:
       HIDDEN_DIM: 1024
       TEXT_PROJ: "linear"
       LOSS_WEIGHT: 1.0
-      ENSEMBLE_ALPHA: 0.5
+      ENSEMBLE_ALPHA: 1.0
