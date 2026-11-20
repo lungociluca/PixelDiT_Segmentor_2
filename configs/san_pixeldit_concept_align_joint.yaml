@@ -1,0 +1,13 @@
+# As san_pixeldit_concept_align.yaml, trained jointly with the side adapter: the
+# adapter is pooled over the predicted masks matched to the GT segments (the CLIP
+# teacher still uses the GT segments), and evaluation classifies the side
+# adapter's masks. No GT and no CLIP image tower at inference.
+#   train: python train_net.py --config-file configs/san_pixeldit_concept_align_joint.yaml --num-gpus 1 OUTPUT_DIR output_align_joint
+_BASE_: san_pixeldit_concept_align.yaml
+MODEL:
+  CONCEPT:
+    GT_MASKS: False
+    LORA:
+      TRAIN_MODE: "joint"
+      LOSS_WEIGHT: 2.0
+      DETACH_MASKS: True

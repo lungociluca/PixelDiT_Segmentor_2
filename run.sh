@@ -1,2 +1,2 @@
 export DETECTRON2_DATASETS="../datasets"; 
-python train_net.py --config-file configs/san_pixeldit_concept_lora.yaml --num-gpus 1 OUTPUT_DIR output;
+python train_net.py --config-file configs/san_pixeldit_concept_align.yaml --num-gpus 1 OUTPUT_DIR output SOLVER.MAX_ITER 999 TEST.EVAL_PERIOD 3000 MODEL.CONCEPT.MASK_HEAD.ENSEMBLE_ALPHA 1.0;

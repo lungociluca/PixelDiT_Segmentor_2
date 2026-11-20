@@ -1,0 +1,26 @@
+# Concept classifier (LoRA) + PixelDiT -> CLIP modality adapter on PixelDiT
+# blocks 1-5. Training distils a GT-scoped CLIP teacher (CorrCLIP-style intra-class
+# attention) into the adapter; evaluation uses only the adapter + CLIP text
+# embeddings, ensembled with the concept classifier. Trains and evaluates on
+# ground-truth segments (like san_pixeldit_concept_lora.yaml), which isolates mask
+# classification: the eval log reports the concept branch, the aligned CLIP
+# branch and their ensemble separately.
+#   train: python train_net.py --config-file configs/san_pixeldit_concept_align.yaml --num-gpus 1 OUTPUT_DIR output_align
+#   eval:  add --eval-only MODEL.WEIGHTS output_align/model_final.pth
+#          (MODEL.CONCEPT.ALIGN.ENSEMBLE_ALPHA 0.0 / 1.0: each branch on its own;
+#           MODEL.CONCEPT.ALIGN.ENSEMBLE entropy: AGO's per-mask selection)
+_BASE_: san_pixeldit_concept_lora.yaml
+MODEL:
+  CONCEPT:
+    ALIGN:
+      ENABLED: True
+      LAYERS: [1, 2, 3, 4, 5]
+      CLIP_MODEL: "ViT-B-16"
+      CLIP_PRETRAINED: "openai"
+      INPUT_SIZE: 672
+      SCOPE_LAYERS: 1
+      QUERY_QUERY: True
+      LOSS_WEIGHT: 1.0
+      CLS_LOSS_WEIGHT: 0.0
+      ENSEMBLE: "geometric"
+      ENSEMBLE_ALPHA: 0.5

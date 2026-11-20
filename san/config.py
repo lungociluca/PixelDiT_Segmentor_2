@@ -204,6 +204,50 @@ def add_san_config(cfg):
     cfg.MODEL.CONCEPT.IMAGE_LORA.RANK = 16
     cfg.MODEL.CONCEPT.IMAGE_LORA.ALPHA = 16.0
     cfg.MODEL.CONCEPT.IMAGE_LORA.GRAD_CHECKPOINT = True
+    # PixelDiT -> CLIP modality adapter (san/model/clip_align.py). Training: a frozen
+    # CLIP image tower with attention restricted to the GT segments (CorrCLIP-style
+    # scope; one segment per class) gives a target embedding per segment, and a
+    # dense MLP on the clean-image tokens of PixelDiT blocks LAYERS, pooled over the
+    # same segment (GT mask in "gt_masks" mode, the matched predicted mask in
+    # "joint" mode), is pulled to it with a cosine loss (AGO-style). Inference: no
+    # CLIP image tower and no GT; the adapter is pooled over the predicted masks,
+    # compared with CLIP text embeddings of the class names and ensembled with the
+    # concept classifier (+ mask head). Needs LORA.ENABLED. pip: open_clip_torch.
+    cfg.MODEL.CONCEPT.ALIGN = CN()
+    cfg.MODEL.CONCEPT.ALIGN.ENABLED = False
+    # PixelDiT blocks (1-based) of the clean-image pass fed to the adapter.
+    cfg.MODEL.CONCEPT.ALIGN.LAYERS = [1, 2, 3, 4, 5]
+    # open_clip model / weights of the teacher and of the text embeddings.
+    cfg.MODEL.CONCEPT.ALIGN.CLIP_MODEL = "ViT-B-16"
+    cfg.MODEL.CONCEPT.ALIGN.CLIP_PRETRAINED = "openai"
+    # Side of the square CLIP input (672 with a /16 model = a 42x42 grid).
+    cfg.MODEL.CONCEPT.ALIGN.INPUT_SIZE = 672
+    # Final CLIP blocks whose attention is restricted to the GT segments (1 = the
+    # last one only, as in CorrCLIP). The last block is always ClearCLIP-style.
+    cfg.MODEL.CONCEPT.ALIGN.SCOPE_LAYERS = 1
+    # Last block: query-query similarities (CorrCLIP baseline) instead of query-key.
+    cfg.MODEL.CONCEPT.ALIGN.QUERY_QUERY = True
+    # A CLIP patch belongs to a segment covering at least this fraction of it.
+    cfg.MODEL.CONCEPT.ALIGN.MIN_COVERAGE = 0.5
+    # Images per teacher forward (bounds the masked-attention memory).
+    cfg.MODEL.CONCEPT.ALIGN.TEACHER_CHUNK = 4
+    # CLIP text templates ({target}); empty = the concept TEMPLATES / TEMPLATE.
+    cfg.MODEL.CONCEPT.ALIGN.TEMPLATES = []
+    cfg.MODEL.CONCEPT.ALIGN.HIDDEN_DIM = 1024
+    cfg.MODEL.CONCEPT.ALIGN.DROPOUT = 0.0
+    # Cosine distillation loss weight.
+    cfg.MODEL.CONCEPT.ALIGN.LOSS_WEIGHT = 1.0
+    # Optional cross-entropy of the aligned embeddings against the CLIP text
+    # embeddings of the training classes. 0 = pure distillation (class-agnostic;
+    # AGO found grounding + alignment on one embedding hurts).
+    cfg.MODEL.CONCEPT.ALIGN.CLS_LOSS_WEIGHT = 0.0
+    # Scale of the aligned cosine logits; <= 0 = CLIP's own logit scale (100).
+    cfg.MODEL.CONCEPT.ALIGN.LOGIT_SCALE = -1.0
+    # "geometric": p ∝ p_concept^(1 - ENSEMBLE_ALPHA) * p_align^ENSEMBLE_ALPHA.
+    # "entropy":   per mask, the branch with the lower entropy (AGO).
+    cfg.MODEL.CONCEPT.ALIGN.ENSEMBLE = "geometric"
+    # 0 = concept classifier (+ mask head) only, 1 = aligned CLIP branch only.
+    cfg.MODEL.CONCEPT.ALIGN.ENSEMBLE_ALPHA = 0.5
     # Diagnostic: ignore the masks and output the per-patch class probabilities as
     # the segmentation, to measure the concept scores on their own.
     cfg.MODEL.CONCEPT.PIXEL_BASELINE = False

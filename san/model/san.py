@@ -25,6 +25,14 @@ from .concept_classifier import (
     instruction_prefix,
     reduce_synonyms,
 )
+from .clip_align import (
+    ClipAlignAdapter,
+    ScopedClipTeacher,
+    clip_logits,
+    combine_with_align,
+    encode_clip_text,
+    load_clip,
+)
 from .criterion import SetCriterion
 from .matcher import HungarianMatcher
 from .side_adapter import build_side_adapter_network
@@ -222,6 +230,23 @@ class SAN(nn.Module):
         image_lora_alpha: float = 16.0,
         image_lora_grad_checkpoint: bool = True,
         oracle_mask_stats: bool = True,
+        align: bool = False,
+        align_layers: Optional[List[int]] = None,
+        align_clip_model: str = "ViT-B-16",
+        align_clip_pretrained: str = "openai",
+        align_input_size: int = 672,
+        align_scope_layers: int = 1,
+        align_query_query: bool = True,
+        align_min_coverage: float = 0.5,
+        align_teacher_chunk: int = 4,
+        align_templates: Optional[List[str]] = None,
+        align_hidden_dim: int = 1024,
+        align_dropout: float = 0.0,
+        align_loss_weight: float = 1.0,
+        align_cls_loss_weight: float = 0.0,
+        align_logit_scale: float = -1.0,
+        align_ensemble: str = "geometric",
+        align_ensemble_alpha: float = 0.5,
     ):
         super().__init__()
         self.size_divisibility = 16
@@ -292,6 +317,30 @@ class SAN(nn.Module):
         self.mask_head = None
         self.image_adapter = None
         self.image_lora_grad_checkpoint = image_lora_grad_checkpoint
+        # PixelDiT -> CLIP modality adapter (MODEL.CONCEPT.ALIGN): trained against a
+        # GT-scoped CLIP teacher, used at inference without CLIP's image tower.
+        if align and not concept_lora:
+            raise ValueError(
+                "MODEL.CONCEPT.ALIGN.ENABLED is trained with the concept classifier and needs "
+                "MODEL.CONCEPT.LORA.ENABLED."
+            )
+        if align_ensemble not in ("geometric", "entropy"):
+            raise ValueError(
+                f"MODEL.CONCEPT.ALIGN.ENSEMBLE must be 'geometric' or 'entropy', got {align_ensemble!r}"
+            )
+        if not 0.0 <= align_ensemble_alpha <= 1.0:
+            raise ValueError(f"MODEL.CONCEPT.ALIGN.ENSEMBLE_ALPHA must be in [0, 1], got {align_ensemble_alpha}")
+        self.align = align
+        self.align_layers = sorted(set(int(k) for k in (align_layers or []))) if align else []
+        if align and (not self.align_layers or self.align_layers[0] < 1):
+            raise ValueError(f"MODEL.CONCEPT.ALIGN.LAYERS must list PixelDiT blocks >= 1, got {align_layers}")
+        self.align_loss_weight = align_loss_weight
+        self.align_cls_loss_weight = align_cls_loss_weight
+        self.align_ensemble = align_ensemble
+        self.align_alpha = align_ensemble_alpha
+        self.align_adapter = None
+        self.align_text = {}           # dataset_name -> (N, D) CLIP text embeddings
+        self.align_variant_class = {}  # dataset_name -> (N,) class index of every variant
         # Deepest PixelDiT block the concept pass has to run.
         self.concept_depth = max(self.concept_layers + self.mask_head_layers) if concept_enabled else 0
         self.oracle_mask_stats = oracle_mask_stats
@@ -313,10 +362,15 @@ class SAN(nn.Module):
             raise ValueError(f"MODEL.PIXELDIT.FEATURE_LAYERS must be non-negative, got {feature_layers}")
         # Blocks built = deepest layer needed by the side adapter or by the concept
         # classifier. Training only runs the side adapter's layers.
-        local_config.layer_count = max(self.feature_layers[-1], self.concept_depth)
+        local_config.layer_count = max([self.feature_layers[-1], self.concept_depth] + self.align_layers)
 
         self.model, self.tokenizer, self.text_encoder = get_model()
         num_blocks = len(self.model.core.patch_blocks)
+        if self.align_layers and self.align_layers[-1] > num_blocks:
+            raise ValueError(
+                f"MODEL.CONCEPT.ALIGN.LAYERS {self.align_layers} go deeper than the "
+                f"{num_blocks} PixelDiT patch blocks."
+            )
         if self.feature_layers[-1] > num_blocks:
             raise ValueError(
                 f"MODEL.PIXELDIT.FEATURE_LAYERS {self.feature_layers} goes deeper than the "
@@ -329,7 +383,7 @@ class SAN(nn.Module):
             )
 
         # The diffusion model is always conditioned on the dataset-agnostic default prompt.
-        default_emb, default_mask, default_tokens = self.embed_condition([local_config.user_prompt])
+        default_emb, default_mask, default_tokens = self.embed_condition([local_config.default_prompt])
         self.default_emb = default_emb.to(torch.float32)      # (1, 1, 300, D)
         self.default_emb_mask = default_mask                  # (1, 300)
         self.default_tokens_count = default_tokens[0]
@@ -382,6 +436,42 @@ class SAN(nn.Module):
                 f"{ {k: v.shape[0] for k, v in self.concept_embs.items()} } concepts "
                 f"({len(templates)} templates, instruction context {concept_instruction_context}), "
                 f"text position {self.concept_position}"
+            )
+
+        # CLIP text embeddings of every dataset's classes for the aligned branch, and
+        # the CLIP image tower as the (training-only) teacher. The teacher is kept
+        # out of the module tree: not checkpointed, not in DDP or the optimizer.
+        self._clip_teacher = None
+        self.align_scale = 1.0
+        if self.align:
+            clip_model, clip_tokenizer = load_clip(align_clip_model, align_clip_pretrained)
+            align_tpl = list(align_templates or []) or list(concept_templates or []) or [concept_template]
+            for name, labels in self.class_labels.items():
+                txt, variant_class = encode_clip_text(
+                    clip_model, clip_tokenizer, labels, align_tpl, local_config.device,
+                    clean_names=concept_clean_names, split_synonyms=concept_split_synonyms,
+                )
+                self.align_text[name] = txt.to(local_config.device)
+                self.align_variant_class[name] = variant_class.to(local_config.device)
+            self.align_scale = (
+                float(clip_model.logit_scale.exp()) if align_logit_scale <= 0 else float(align_logit_scale)
+            )
+            self.__dict__["_clip_teacher"] = ScopedClipTeacher(
+                clip_model.visual.cpu(),
+                input_size=align_input_size,
+                scope_layers=align_scope_layers,
+                query_query=align_query_query,
+                min_coverage=align_min_coverage,
+                chunk=align_teacher_chunk,
+            )
+            self.align_clip_dim = self._clip_teacher.embed_dim
+            del clip_model
+            get_root_logger().info(
+                f"CLIP alignment: PixelDiT blocks {self.align_layers} -> {align_clip_model} "
+                f"({align_clip_pretrained}, dim {self.align_clip_dim}), teacher input "
+                f"{align_input_size}px, scope on the last {align_scope_layers} block(s), "
+                f"{len(align_tpl)} templates, logit scale {self.align_scale:.1f}, "
+                f"ensemble {align_ensemble} (alpha {align_ensemble_alpha})"
             )
 
         # Training vocabulary without the held-out classes:
@@ -452,6 +542,14 @@ class SAN(nn.Module):
                     text_proj=mask_head_text_proj,
                     init_logit_scale=mask_head_init_logit_scale,
                     dropout=mask_head_dropout,
+                )
+            if self.align:
+                self.align_adapter = ClipAlignAdapter(
+                    hidden_size,
+                    self.align_clip_dim,
+                    num_layers=len(self.align_layers),
+                    hidden_dim=align_hidden_dim,
+                    dropout=align_dropout,
                 )
             if image_lora:
                 # Same low-rank form as the concept adapter, on qkv_x / proj_x of
@@ -558,28 +656,38 @@ class SAN(nn.Module):
             "image_lora_alpha": cfg.MODEL.CONCEPT.IMAGE_LORA.ALPHA,
             "image_lora_grad_checkpoint": cfg.MODEL.CONCEPT.IMAGE_LORA.GRAD_CHECKPOINT,
             "oracle_mask_stats": cfg.MODEL.SAN.ORACLE_CLASSES.MASK_STATS,
+            "align": cfg.MODEL.CONCEPT.ALIGN.ENABLED,
+            "align_layers": list(cfg.MODEL.CONCEPT.ALIGN.LAYERS),
+            "align_clip_model": cfg.MODEL.CONCEPT.ALIGN.CLIP_MODEL,
+            "align_clip_pretrained": cfg.MODEL.CONCEPT.ALIGN.CLIP_PRETRAINED,
+            "align_input_size": cfg.MODEL.CONCEPT.ALIGN.INPUT_SIZE,
+            "align_scope_layers": cfg.MODEL.CONCEPT.ALIGN.SCOPE_LAYERS,
+            "align_query_query": cfg.MODEL.CONCEPT.ALIGN.QUERY_QUERY,
+            "align_min_coverage": cfg.MODEL.CONCEPT.ALIGN.MIN_COVERAGE,
+            "align_teacher_chunk": cfg.MODEL.CONCEPT.ALIGN.TEACHER_CHUNK,
+            "align_templates": list(cfg.MODEL.CONCEPT.ALIGN.TEMPLATES),
+            "align_hidden_dim": cfg.MODEL.CONCEPT.ALIGN.HIDDEN_DIM,
+            "align_dropout": cfg.MODEL.CONCEPT.ALIGN.DROPOUT,
+            "align_loss_weight": cfg.MODEL.CONCEPT.ALIGN.LOSS_WEIGHT,
+            "align_cls_loss_weight": cfg.MODEL.CONCEPT.ALIGN.CLS_LOSS_WEIGHT,
+            "align_logit_scale": cfg.MODEL.CONCEPT.ALIGN.LOGIT_SCALE,
+            "align_ensemble": cfg.MODEL.CONCEPT.ALIGN.ENSEMBLE,
+            "align_ensemble_alpha": cfg.MODEL.CONCEPT.ALIGN.ENSEMBLE_ALPHA,
         }
     
-    def embed_condition(self, prompts):
-        # Upstream (t2i/inference.py) encoding: CHI + prompt, padded to
-        # CHI tokens + 300 - 2, keep [BOS] + the last 299 positions. An empty
-        # prompt is the null caption: no CHI, 300 tokens (select_index = all).
-        L = 300
-        if all(p == "" for p in prompts):
-            texts, max_length = prompts, L
-        else:
-            chi = local_config.chi_prompt
-            texts = [chi + p for p in prompts]
-            max_length = len(self.tokenizer.encode(chi)) + L - 2
+    def embed_condition(self, prompts, with_chi_window=False):
+        max_length = 506 if with_chi_window else 300
         caption_token = self.tokenizer(
-            texts, max_length=max_length, padding="max_length", truncation=True, return_tensors="pt"
+            prompts, max_length=max_length, padding="max_length", truncation=True, return_tensors="pt"
         ).to(local_config.device)
-        select_index = [0] + list(range(-L + 1, 0))
-        caption_embs = self.text_encoder(caption_token.input_ids, caption_token.attention_mask)[0][:, None][
+        select_index = [0] + list(range(-300 + 1, 0)) if with_chi_window else list(range(300))
+        caption_embs_list = [self.text_encoder(caption_token.input_ids[[i]], caption_token.attention_mask[[i]])[0][:, None][
             :, :, select_index
-        ]
+        ] for i in range(caption_token.input_ids.shape[0])]
+        caption_embs = torch.cat(caption_embs_list, dim=0)
+        tokens_count = caption_token.attention_mask.sum(dim=-1)
         emb_masks = caption_token.attention_mask[:, select_index]
-        return caption_embs, emb_masks, emb_masks.sum(dim=-1)
+        return caption_embs, emb_masks, tokens_count
     
     def run_diffusion_model(self, image, segment_data, timestep=None):
         """One forward pass of the frozen PixelDiT on `image` at flow time `timestep`
@@ -748,9 +856,11 @@ class SAN(nn.Module):
             concept_out = self.concept_pass(images.tensor, dataset_name, train=True, keep=keep)
         h, w = concept_out["hw"]
         H_pad, W_pad = images.tensor.shape[-2:]
+        align_dense = self._align_dense(images.tensor, hw=(h, w)) if self.align else None
         with torch.autocast(images.tensor.device.type, enabled=False):
             pixel_logits = self.concept_classifier.pixel_scores(concept_out["scores"])  # (B, h*w, C)
             logits, head_logits, targets = [], [], []
+            student, teacher_masks, teacher_pick = [], [], []
             for i, x in enumerate(batched_inputs):
                 instances = x["instances"].to(local_config.device)
                 masks, classes = instances.gt_masks, instances.gt_classes
@@ -758,6 +868,8 @@ class SAN(nn.Module):
                     classes = remap[classes]
                     masks, classes = masks[classes >= 0], classes[classes >= 0]
                 if classes.numel() == 0:
+                    teacher_masks.append(images.tensor.new_zeros(0, H_pad, W_pad))
+                    teacher_pick.append(None)
                     continue
                 padded = F.pad(
                     masks.float(), (0, W_pad - masks.shape[-1], 0, H_pad - masks.shape[-2])
@@ -770,11 +882,20 @@ class SAN(nn.Module):
                 if hl is not None:
                     head_logits.append(hl)
                 targets.append(classes[visible])
+                if align_dense is not None:
+                    student.append(self.align_adapter.pool(align_dense[i], weights[visible]))
+                    teacher_masks.append(padded)  # every kept segment shapes the teacher's scope
+                    teacher_pick.append(visible.nonzero().squeeze(1))
             if not logits or sum(t.numel() for t in targets) == 0:
                 return self._zero_classification_loss(pixel_logits)
             logits, targets = torch.cat(logits), torch.cat(targets)
             head_logits = torch.cat(head_logits) if head_logits else None
-            return self._classification_loss(logits, head_logits, targets)
+            losses = self._classification_loss(logits, head_logits, targets)
+            if align_dense is not None:
+                losses.update(self._align_losses(
+                    images.tensor, teacher_masks, teacher_pick, torch.cat(student), targets, dataset_name, keep
+                ))
+            return losses
 
     def _zero_classification_loss(self, ref):
         """Zero losses (with every trainable classifier part in the graph) for a
@@ -783,6 +904,86 @@ class SAN(nn.Module):
         losses = {"loss_concept_cls": zero}
         if self.mask_head is not None:
             losses["loss_mask_head_cls"] = zero + sum(p.sum() * 0.0 for p in self.mask_head.parameters())
+        if self.align_adapter is not None:
+            losses["loss_align"] = zero + sum(p.sum() * 0.0 for p in self.align_adapter.parameters())
+        return losses
+
+    # ------------------------------------------------------- CLIP alignment
+    def _align_dense(self, image_tensor, features=None, hw=None):
+        """(B, h*w, D) CLIP-aligned dense features of the clean image, from the
+        PixelDiT blocks MODEL.CONCEPT.ALIGN.LAYERS. `features` ({layer: (B, h*w,
+        hidden)}) reuses an existing clean pass; otherwise one is run."""
+        if features is None:
+            segment_data = {"feature_layers": list(self.align_layers)}
+            self._run_backbone(image_tensor, segment_data)
+            features, got_hw = segment_data["features"], segment_data["hw"]
+            if hw is not None and tuple(got_hw) != tuple(hw):
+                raise RuntimeError(f"Clean pass grid {got_hw} differs from the concept pass grid {hw}.")
+        feats = {k: features[k].detach() for k in self.align_layers}
+        with torch.autocast(
+            image_tensor.device.type, dtype=self.amp_dtype or torch.float32, enabled=self.amp_dtype is not None
+        ):
+            dense = self.align_adapter.dense(feats)
+        return dense.float()
+
+    def _align_vocab(self, dataset_name, keep=None):
+        """CLIP text variants (N, D) of `dataset_name` (restricted to the classes
+        in `keep`), their class index (renumbered to positions in `keep`) and the
+        number of classes."""
+        text = self.align_text[dataset_name]
+        variant_class = self.align_variant_class[dataset_name]
+        if keep is None:
+            return text, variant_class, len(self.class_labels[dataset_name])
+        new_id = torch.full(
+            (len(self.class_labels[dataset_name]),), -1, dtype=torch.long, device=variant_class.device
+        )
+        new_id[keep.to(variant_class.device)] = torch.arange(keep.numel(), device=variant_class.device)
+        sel = (new_id[variant_class] >= 0).nonzero().squeeze(1)
+        return text[sel], new_id[variant_class[sel]], keep.numel()
+
+    def _align_mask_logits(self, dense, weights, dataset_name, keep=None):
+        """dense (P, D) of one image, mask weights (Q, P) -> (Q, K) CLIP logits."""
+        text, variant_class, num_classes = self._align_vocab(dataset_name, keep)
+        emb = self.align_adapter.pool(dense, weights)
+        return clip_logits(emb, text, variant_class, num_classes, self.align_scale, self.concept_synonym_reduce)
+
+    def _align_losses(self, images_tensor, teacher_masks, teacher_pick, student, targets, dataset_name, keep=None):
+        """Cosine distillation of the student mask embeddings (M, D) to the
+        GT-scoped CLIP teacher's segment embeddings (+ optional CE in CLIP space).
+
+        teacher_masks: per image (S_i, H_pad, W_pad) GT segments defining the scope.
+        teacher_pick:  per image the indices (into S_i) of the segments matching
+                       the student rows, in order (None = image skipped)."""
+        teacher = self._clip_teacher.to(images_tensor.device)
+        regions = teacher.region_embeddings(images_tensor, teacher_masks)
+        target = torch.cat([r[p] for r, p in zip(regions, teacher_pick) if p is not None])
+        assert target.shape == student.shape, (target.shape, student.shape)
+        cos = (student * target).sum(-1)
+        losses = {"loss_align": self.align_loss_weight * (1.0 - cos).mean()}
+        text, variant_class, num_classes = self._align_vocab(dataset_name, keep)
+        student_logits = clip_logits(
+            student, text, variant_class, num_classes, self.align_scale, self.concept_synonym_reduce
+        )
+        if self.align_cls_loss_weight > 0:
+            losses["loss_align_cls"] = self.align_cls_loss_weight * F.cross_entropy(
+                student_logits, targets, label_smoothing=self.concept_label_smoothing
+            )
+        try:
+            from detectron2.utils.events import get_event_storage
+
+            storage = get_event_storage()
+            with torch.no_grad():
+                teacher_logits = clip_logits(
+                    target, text, variant_class, num_classes, self.align_scale, self.concept_synonym_reduce
+                )
+                storage.put_scalar("align_cos", cos.mean().item())
+                storage.put_scalar("align_acc", (student_logits.argmax(-1) == targets).float().mean().item())
+                # Zero-shot accuracy of the GT-scoped teacher itself: the ceiling.
+                storage.put_scalar(
+                    "align_teacher_acc", (teacher_logits.argmax(-1) == targets).float().mean().item()
+                )
+        except AssertionError:
+            pass  # no event storage outside a trainer
         return losses
 
     def call_model(self, image_tensor, dataset_name):
@@ -792,8 +993,8 @@ class SAN(nn.Module):
         with torch.autocast(
             "cuda", dtype=self.amp_dtype or torch.float32, enabled=self.amp_dtype is not None
         ):
-            mask_logits, mask_preds, concept_out = self._call_model(image_tensor, dataset_name)
-        return [x.float() for x in mask_logits], [x.float() for x in mask_preds], concept_out
+            mask_logits, mask_preds, concept_out, align_dense = self._call_model(image_tensor, dataset_name)
+        return [x.float() for x in mask_logits], [x.float() for x in mask_preds], concept_out, align_dense
 
     def _call_model(self, image_tensor, dataset_name):
         """Run the frozen backbone and the side adapter.
@@ -807,8 +1008,12 @@ class SAN(nn.Module):
         and, at inference with MODEL.CONCEPT.ENABLED, a dict (None otherwise):
           "scores": {layer: (B, h*w, C)} image-token / class-concept similarities
           "hw":     (h, w) PixelDiT patch grid
+        and, with MODEL.CONCEPT.ALIGN (at inference, or in "joint" training), the
+        (B, h*w, D) CLIP-aligned dense features of this clean pass (None otherwise).
         """
-        segment_data = {"feature_layers": self.feature_layers}
+        use_align = self.align and (not self.training or self.concept_joint)
+        tap = sorted(set(self.feature_layers) | (set(self.align_layers) if use_align else set()))
+        segment_data = {"feature_layers": tap}
         use_concepts = self.concept_enabled and not self.training
         # Concepts share this (clean image) pass only when no noise is requested;
         # otherwise they get their own noised pass below.
@@ -836,8 +1041,12 @@ class SAN(nn.Module):
         backbone_features = {
             k: v.detach().float().transpose(1, 2).reshape(v.shape[0], v.shape[-1], h, w)
             for k, v in segment_data["features"].items()
+            if k in self.feature_layers
         }
         mask_preds, mask_logits = self.side_adapter_network(image_tensor, backbone_features)
+        align_dense = (
+            self._align_dense(image_tensor, features=segment_data["features"]) if use_align else None
+        )
         concept_out = None
         if share_pass:
             concept_out = {
@@ -846,7 +1055,7 @@ class SAN(nn.Module):
             }
         elif use_concepts:
             concept_out = self.concept_pass(image_tensor, dataset_name)
-        return mask_logits, mask_preds, concept_out
+        return mask_logits, mask_preds, concept_out, align_dense
 
     def forward(self, batched_inputs):
         images = [x["image"].to(local_config.device).float() / 255.0 for x in batched_inputs]
@@ -863,7 +1072,7 @@ class SAN(nn.Module):
             return self.gt_mask_inference(batched_inputs, images, dataset_name)
         if self.concept_lora and self.training and not self.concept_joint:
             return self.concept_train_forward(batched_inputs, images, dataset_name)
-        mask_logits, mask_preds, concept_out = self.call_model(images_tensor, dataset_name)
+        mask_logits, mask_preds, concept_out, align_dense = self.call_model(images_tensor, dataset_name)
         if self.training:
             if "instances" in batched_inputs[0]:
                 gt_instances = [x["instances"].to(local_config.device) for x in batched_inputs]
@@ -897,10 +1106,12 @@ class SAN(nn.Module):
                     losses.pop(k)
             if self.concept_joint and targets is not None:
                 cls_losses = self.concept_joint_loss(
-                    images_tensor, mask_preds[-1], gt_instances, self.criterion.last_indices, dataset_name
+                    images_tensor, mask_preds[-1], gt_instances, self.criterion.last_indices, dataset_name,
+                    align_dense=align_dense,
                 )
                 for k, v in cls_losses.items():
-                    losses[k] = self.concept_loss_weight * v
+                    # The alignment losses carry their own weights (ALIGN.*LOSS_WEIGHT).
+                    losses[k] = v if k.startswith("loss_align") else self.concept_loss_weight * v
             return losses
         else:
             mask_preds = mask_preds[-1]
@@ -929,6 +1140,10 @@ class SAN(nn.Module):
                         if self.mask_head is not None:
                             concept_cls = self._ensemble_with_head(
                                 concept_cls, concept_out, mask_preds, dataset_name
+                            )
+                        if align_dense is not None:
+                            concept_cls = self._ensemble_with_align(
+                                concept_cls, align_dense, mask_preds, concept_out["hw"], dataset_name
                             )
             mask_preds = F.interpolate(
                 mask_preds,
@@ -1017,7 +1232,24 @@ class SAN(nn.Module):
             out.append(ensemble_probs(concept_cls[i], hl, self.mask_head_alpha))
         return torch.stack(out)
 
-    def concept_joint_loss(self, images_tensor, mask_preds, gt_instances, indices, dataset_name):
+    @torch.no_grad()
+    def _ensemble_with_align(self, concept_cls, align_dense, mask_preds, hw, dataset_name):
+        """(B, Q, K) class probabilities of the predicted masks, ensembled with the
+        CLIP-aligned branch (MODEL.CONCEPT.ALIGN.ENSEMBLE / ENSEMBLE_ALPHA)."""
+        h, w = hw
+        m = mask_preds.float()
+        if tuple(m.shape[-2:]) != (h, w):
+            m = F.interpolate(m, size=(h, w), mode="bilinear", align_corners=False)
+        m = m.sigmoid().flatten(2)  # (B, Q, h*w)
+        if self.concept_classifier.binarize_masks:
+            m = (m > self.concept_classifier.mask_threshold).float()
+        out = []
+        for i in range(concept_cls.shape[0]):
+            al = self._align_mask_logits(align_dense[i], m[i], dataset_name)
+            out.append(combine_with_align(concept_cls[i], al, self.align_ensemble, self.align_alpha))
+        return torch.stack(out)
+
+    def concept_joint_loss(self, images_tensor,mask_preds, gt_instances, indices, dataset_name, align_dense=None):
         """Cross-entropy of the concept classifier on the predicted masks that the
         Hungarian matcher assigned to ground-truth segments (TRAIN_MODE "joint").
 
@@ -1039,25 +1271,42 @@ class SAN(nn.Module):
             if tuple(masks.shape[-2:]) != (h, w):
                 masks = F.interpolate(masks, size=(h, w), mode="bilinear", align_corners=False)
             masks = masks.sigmoid().flatten(2)  # (B, Q, h*w)
+            H_pad, W_pad = images_tensor.shape[-2:]
             logits, head_logits, targets = [], [], []
+            student, teacher_masks, teacher_pick = [], [], []
             for i, (src, tgt) in enumerate(indices):
-                classes = gt_instances[i].gt_classes[tgt.to(local_config.device)]
+                tgt = tgt.to(local_config.device)
+                classes = gt_instances[i].gt_classes[tgt]
                 src = src.to(local_config.device)
                 if remap is not None:
                     classes = remap[classes]
-                    src, classes = src[classes >= 0], classes[classes >= 0]
+                    src, tgt, classes = src[classes >= 0], tgt[classes >= 0], classes[classes >= 0]
                 if classes.numel() == 0:
+                    teacher_masks.append(images_tensor.new_zeros(0, H_pad, W_pad))
+                    teacher_pick.append(None)
                     continue
                 logits.append(self.concept_classifier.pool_logits(pixel_logits[i], masks[i, src]))
                 hl = self._head_logits(concept_out, i, masks[i, src], dataset_name)
                 if hl is not None:
                     head_logits.append(hl)
                 targets.append(classes)
+                if align_dense is not None:
+                    # Student: the predicted (matched) mask; teacher: its GT segment,
+                    # with every GT segment of the image shaping the teacher's scope.
+                    student.append(self.align_adapter.pool(align_dense[i], masks[i, src]))
+                    gt = gt_instances[i].gt_masks.float()
+                    teacher_masks.append(F.pad(gt, (0, W_pad - gt.shape[-1], 0, H_pad - gt.shape[-2])))
+                    teacher_pick.append(tgt)
             if not logits:
                 return self._zero_classification_loss(pixel_logits)
             logits, targets = torch.cat(logits), torch.cat(targets)
             head_logits = torch.cat(head_logits) if head_logits else None
-            return self._classification_loss(logits, head_logits, targets)
+            losses = self._classification_loss(logits, head_logits, targets)
+            if align_dense is not None:
+                losses.update(self._align_losses(
+                    images_tensor, teacher_masks, teacher_pick, torch.cat(student), targets, dataset_name, keep
+                ))
+            return losses
 
     @torch.no_grad()
     def gt_mask_inference(self, batched_inputs, images, dataset_name):
@@ -1075,6 +1324,10 @@ class SAN(nn.Module):
         ignore_label = self._ignore_label(dataset_name)
         pixel_scores = self.concept_classifier.pixel_scores(concept_out["scores"])  # (B, h*w, C)
         stats = self.concept_gt_stats.setdefault(dataset_name, [0, 0])
+        # Aligned branch: a clean-image pass (no CLIP image tower at inference).
+        align_dense = self._align_dense(images.tensor, hw=(h, w)) if self.align else None
+        # Per-branch top-1 on the GT segments: [concept (+head), aligned CLIP, final].
+        branch_stats = self.concept_gt_stats.setdefault(dataset_name + "/branches", [0, 0, 0])
 
         processed_results = []
         for i, (input_per_image, image_size) in enumerate(zip(batched_inputs, images.image_sizes)):
@@ -1093,14 +1346,27 @@ class SAN(nn.Module):
                 if self.mask_head is not None:
                     hl = self._head_logits(concept_out, i, weights, dataset_name)
                     probs = ensemble_probs(probs, hl, self.mask_head_alpha)
+                if align_dense is not None:
+                    al = self._align_mask_logits(align_dense[i], weights, dataset_name)
+                    branch_stats[0] += int((probs.argmax(dim=-1) == gt_classes).sum())
+                    branch_stats[1] += int((al.argmax(dim=-1) == gt_classes).sum())
+                    probs = combine_with_align(probs, al, self.align_ensemble, self.align_alpha)
+                    branch_stats[2] += int(gt_classes.numel())
                 sem_seg = torch.einsum("sc,shw->chw", probs, masks)
                 stats[0] += int((probs.argmax(dim=-1) == gt_classes).sum())
                 stats[1] += int(gt_classes.numel())
                 if stats[1] // 500 != (stats[1] - gt_classes.numel()) // 500:
-                    get_root_logger().info(
+                    msg = (
                         f"[{dataset_name}] GT-mask classification top-1: "
                         f"{100.0 * stats[0] / stats[1]:.2f}% of {stats[1]} segments"
                     )
+                    if align_dense is not None:
+                        n = max(branch_stats[2], 1)
+                        msg += (
+                            f" (concept {100.0 * branch_stats[0] / n:.2f}%, "
+                            f"aligned CLIP {100.0 * branch_stats[1] / n:.2f}%)"
+                        )
+                    get_root_logger().info(msg)
             processed_results.append(
                 {"sem_seg": retry_if_cuda_oom(sem_seg_postprocess)(sem_seg, image_size, height, width)}
             )

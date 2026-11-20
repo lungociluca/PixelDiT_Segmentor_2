@@ -105,6 +105,13 @@ class Trainer(DefaultTrainer):
                 logger.info(f"[{name}] GT-mask classification top-1: {acc:.2f}% of {gt[1]} segments")
                 if isinstance(results.get(name), dict):
                     results[name]["gt_mask_cls"] = {"top1": acc, "segments": gt[1]}
+                # MODEL.CONCEPT.ALIGN: each branch on its own, before the ensemble.
+                br = getattr(core, "concept_gt_stats", {}).get(name + "/branches")
+                if br and br[2]:
+                    c_acc, a_acc = 100.0 * br[0] / br[2], 100.0 * br[1] / br[2]
+                    logger.info(f"[{name}] GT-mask top-1 per branch: concept {c_acc:.2f}%, aligned CLIP {a_acc:.2f}%")
+                    if isinstance(results.get(name), dict):
+                        results[name]["gt_mask_cls"].update({"concept_top1": c_acc, "align_top1": a_acc})
             if hasattr(core, "mask_stats"):
                 stats = core.mask_stats(name)
                 if stats:
