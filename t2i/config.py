@@ -45,7 +45,23 @@ tmp = """
 small or large [TARGET]; near or distant [TARGET]; visible, partially visible, occluded, or truncated [TARGET]; isolated, overlapping, or crowded [TARGET]; [TARGET] defined by its overall shape; [TARGET] defined by its distinctive parts; [TARGET] defined by its visual appearance, texture, or material; [TARGET] defined by its local boundaries and separation from surrounding regions.
 """
 
-default_prompt = 'Given a user prompt, generate an "Enhanced prompt" that provides detailed visual descriptions suitable for image generation. Evaluate the level of detail in the user prompt: If the prompt is simple, focus on adding specifics about colors, shapes, sizes, textures, and spatial relationships to create vivid and concrete scenes. If the prompt is already detailed, refine and enhance the existing details slightly without overcomplicating. Here are examples of how to transform or refine prompts: User Prompt: A cat sleeping -> Enhanced: A small, fluffy white cat curled up in a round shape, sleeping peacefully on a warm sunny windowsill, surrounded by pots of blooming red flowers. User Prompt: A busy city street -> Enhanced: A bustling city street scene at dusk, featuring glowing street lamps, a diverse crowd of people in colorful clothing, and a double-decker bus passing by towering glass skyscrapers. Please generate only the enhanced description for the prompt below and avoid including any additional commentary or evaluations: User Prompt: A picture with a complex scene, multiple objects, maybe sky, vegetation.'
+# Complex Human Instruction, exactly as upstream builds it ("\n".join of
+# text_encoder.chi_prompt in diffusion_configs/*.yaml).
+chi_prompt = "\n".join([
+    'Given a user prompt, generate an "Enhanced prompt" that provides detailed visual descriptions suitable for image generation. Evaluate the level of detail in the user prompt:',
+    '- If the prompt is simple, focus on adding specifics about colors, shapes, sizes, textures, and spatial relationships to create vivid and concrete scenes.',
+    '- If the prompt is already detailed, refine and enhance the existing details slightly without overcomplicating.',
+    'Here are examples of how to transform or refine prompts:',
+    '- User Prompt: A cat sleeping -> Enhanced: A small, fluffy white cat curled up in a round shape, sleeping peacefully on a warm sunny windowsill, surrounded by pots of blooming red flowers.',
+    '- User Prompt: A busy city street -> Enhanced: A bustling city street scene at dusk, featuring glowing street lamps, a diverse crowd of people in colorful clothing, and a double-decker bus passing by towering glass skyscrapers.',
+    'Please generate only the enhanced description for the prompt below and avoid including any additional commentary or evaluations:',
+    'User Prompt: ',
+])
+# Caption the backbone is conditioned on. "" = the null caption (unconditioned,
+# as in upstream CFG dropout: no CHI, padded to 300 tokens).
+user_prompt = 'A picture with a complex scene, multiple objects, maybe sky, vegetation.'
+# Still used as the concept-encoding context (via instruction_prefix).
+default_prompt = chi_prompt + user_prompt
 subprompt = 'A picture of a {target}'
 prompt_format = 'A picture of a {target}'
 

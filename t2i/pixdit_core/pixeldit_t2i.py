@@ -460,9 +460,10 @@ class PixDiT_T2I(nn.Module):
                 if m.dim() == 3 and m.size(1) == 1:
                     m = m.squeeze(1)
                 if m.dim() == 2:
-                    pad = (m == 0)
-                    pad_img = torch.zeros((B, L), dtype=torch.bool, device=x.device)
-                    attn_mask_joint = torch.cat([pad[:, :Ltxt], pad_img], dim=1).view(B, 1, 1, Ltxt + L)
+                    # SDPA bool mask: True = may attend. Keep real text tokens and all image tokens.
+                    keep_txt = (m[:, :Ltxt] != 0).to(x.device).expand(B, -1)
+                    keep_img = torch.ones((B, L), dtype=torch.bool, device=x.device)
+                    attn_mask_joint = torch.cat([keep_txt, keep_img], dim=1).view(B, 1, 1, Ltxt + L)
             self.last_repa_tokens = None
             s = s0
             if tap_layers is not None and 0 in tap_layers:

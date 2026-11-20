@@ -329,7 +329,7 @@ class SAN(nn.Module):
             )
 
         # The diffusion model is always conditioned on the dataset-agnostic default prompt.
-        default_emb, default_mask, default_tokens = self.embed_condition([local_config.default_prompt])
+        default_emb, default_mask, default_tokens = self.embed_condition([local_config.user_prompt])
         self.default_emb = default_emb.to(torch.float32)      # (1, 1, 300, D)
         self.default_emb_mask = default_mask                  # (1, 300)
         self.default_tokens_count = default_tokens[0]
@@ -560,19 +560,26 @@ class SAN(nn.Module):
             "oracle_mask_stats": cfg.MODEL.SAN.ORACLE_CLASSES.MASK_STATS,
         }
     
-    def embed_condition(self, prompts, with_chi_window=False):
-        max_length = 506 if with_chi_window else 300
+    def embed_condition(self, prompts):
+        # Upstream (t2i/inference.py) encoding: CHI + prompt, padded to
+        # CHI tokens + 300 - 2, keep [BOS] + the last 299 positions. An empty
+        # prompt is the null caption: no CHI, 300 tokens (select_index = all).
+        L = 300
+        if all(p == "" for p in prompts):
+            texts, max_length = prompts, L
+        else:
+            chi = local_config.chi_prompt
+            texts = [chi + p for p in prompts]
+            max_length = len(self.tokenizer.encode(chi)) + L - 2
         caption_token = self.tokenizer(
-            prompts, max_length=max_length, padding="max_length", truncation=True, return_tensors="pt"
+            texts, max_length=max_length, padding="max_length", truncation=True, return_tensors="pt"
         ).to(local_config.device)
-        select_index = [0] + list(range(-300 + 1, 0)) if with_chi_window else list(range(300))
-        caption_embs_list = [self.text_encoder(caption_token.input_ids[[i]], caption_token.attention_mask[[i]])[0][:, None][
+        select_index = [0] + list(range(-L + 1, 0))
+        caption_embs = self.text_encoder(caption_token.input_ids, caption_token.attention_mask)[0][:, None][
             :, :, select_index
-        ] for i in range(caption_token.input_ids.shape[0])]
-        caption_embs = torch.cat(caption_embs_list, dim=0)
-        tokens_count = caption_token.attention_mask.sum(dim=-1)
+        ]
         emb_masks = caption_token.attention_mask[:, select_index]
-        return caption_embs, emb_masks, tokens_count
+        return caption_embs, emb_masks, emb_masks.sum(dim=-1)
     
     def run_diffusion_model(self, image, segment_data, timestep=None):
         """One forward pass of the frozen PixelDiT on `image` at flow time `timestep`
