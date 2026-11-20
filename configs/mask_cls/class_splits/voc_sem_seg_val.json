@@ -1,0 +1,171 @@
+{
+ "dataset": "voc_sem_seg_val",
+ "reference": "coco_stuff_171",
+ "num_seen": 20,
+ "num_unseen": 0,
+ "seen": [
+  "aeroplane",
+  "bicycle",
+  "bird",
+  "boat",
+  "bottle",
+  "bus",
+  "car",
+  "cat",
+  "chair",
+  "cow",
+  "diningtable",
+  "dog",
+  "horse",
+  "motorbike",
+  "person",
+  "pottedplant",
+  "sheep",
+  "sofa",
+  "train",
+  "tv"
+ ],
+ "unseen": [],
+ "classes": [
+  {
+   "id": 0,
+   "name": "aeroplane",
+   "seen": true,
+   "coco_match": "airplane",
+   "rule": "synonym:aeroplane"
+  },
+  {
+   "id": 1,
+   "name": "bicycle",
+   "seen": true,
+   "coco_match": "bicycle",
+   "rule": "exact:bicycle"
+  },
+  {
+   "id": 2,
+   "name": "bird",
+   "seen": true,
+   "coco_match": "bird",
+   "rule": "exact:bird"
+  },
+  {
+   "id": 3,
+   "name": "boat",
+   "seen": true,
+   "coco_match": "boat",
+   "rule": "exact:boat"
+  },
+  {
+   "id": 4,
+   "name": "bottle",
+   "seen": true,
+   "coco_match": "bottle",
+   "rule": "exact:bottle"
+  },
+  {
+   "id": 5,
+   "name": "bus",
+   "seen": true,
+   "coco_match": "bus",
+   "rule": "exact:bus"
+  },
+  {
+   "id": 6,
+   "name": "car",
+   "seen": true,
+   "coco_match": "car",
+   "rule": "exact:car"
+  },
+  {
+   "id": 7,
+   "name": "cat",
+   "seen": true,
+   "coco_match": "cat",
+   "rule": "exact:cat"
+  },
+  {
+   "id": 8,
+   "name": "chair",
+   "seen": true,
+   "coco_match": "chair",
+   "rule": "exact:chair"
+  },
+  {
+   "id": 9,
+   "name": "cow",
+   "seen": true,
+   "coco_match": "cow",
+   "rule": "exact:cow"
+  },
+  {
+   "id": 10,
+   "name": "diningtable",
+   "seen": true,
+   "coco_match": "dining table",
+   "rule": "exact:dining table"
+  },
+  {
+   "id": 11,
+   "name": "dog",
+   "seen": true,
+   "coco_match": "dog",
+   "rule": "exact:dog"
+  },
+  {
+   "id": 12,
+   "name": "horse",
+   "seen": true,
+   "coco_match": "horse",
+   "rule": "exact:horse"
+  },
+  {
+   "id": 13,
+   "name": "motorbike",
+   "seen": true,
+   "coco_match": "motorcycle",
+   "rule": "synonym:motorbike"
+  },
+  {
+   "id": 14,
+   "name": "person",
+   "seen": true,
+   "coco_match": "person",
+   "rule": "exact:person"
+  },
+  {
+   "id": 15,
+   "name": "pottedplant",
+   "seen": true,
+   "coco_match": "potted plant",
+   "rule": "exact:potted plant"
+  },
+  {
+   "id": 16,
+   "name": "sheep",
+   "seen": true,
+   "coco_match": "sheep",
+   "rule": "exact:sheep"
+  },
+  {
+   "id": 17,
+   "name": "sofa",
+   "seen": true,
+   "coco_match": "couch",
+   "rule": "synonym:sofa"
+  },
+  {
+   "id": 18,
+   "name": "train",
+   "seen": true,
+   "coco_match": "train",
+   "rule": "exact:train"
+  },
+  {
+   "id": 19,
+   "name": "tv",
+   "seen": true,
+   "coco_match": "tv",
+   "rule": "exact:tv"
+  }
+ ]
+}

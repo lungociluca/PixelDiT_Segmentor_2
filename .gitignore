@@ -58,3 +58,5 @@ amlt
 
 debug
 metrics.json
+# Stage 1 mask-classification feature caches
+cache/

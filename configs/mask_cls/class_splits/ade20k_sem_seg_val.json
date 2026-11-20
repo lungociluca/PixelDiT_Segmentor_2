@@ -1,0 +1,1212 @@
+{
+ "dataset": "ade20k_sem_seg_val",
+ "reference": "coco_stuff_171",
+ "num_seen": 74,
+ "num_unseen": 76,
+ "seen": [
+  "wall",
+  "building",
+  "sky",
+  "floor",
+  "tree",
+  "ceiling",
+  "road, route",
+  "bed",
+  "window",
+  "grass",
+  "cabinet",
+  "sidewalk, pavement",
+  "person",
+  "earth, ground",
+  "door",
+  "table",
+  "mountain, mount",
+  "plant",
+  "curtain",
+  "chair",
+  "car",
+  "water",
+  "sofa",
+  "shelf",
+  "house",
+  "sea",
+  "mirror",
+  "rug",
+  "armchair",
+  "fence",
+  "desk",
+  "rock, stone",
+  "cushion",
+  "counter",
+  "sand",
+  "sink",
+  "skyscraper",
+  "refrigerator, icebox",
+  "stairs",
+  "pillow",
+  "stairway, staircase",
+  "river",
+  "bridge, span",
+  "toilet, can, commode, crapper, pot, potty, stool, throne",
+  "flower",
+  "book",
+  "hill",
+  "bench",
+  "countertop",
+  "swivel chair",
+  "boat",
+  "bus",
+  "towel",
+  "light",
+  "truck",
+  "tv",
+  "dirt track",
+  "clothes",
+  "land, ground, soil",
+  "bannister, banister, balustrade, balusters, handrail",
+  "bottle",
+  "buffet, counter, sideboard",
+  "ship",
+  "tent",
+  "minibike, motorbike",
+  "oven",
+  "ball",
+  "food, solid food",
+  "microwave",
+  "bicycle",
+  "blanket, cover",
+  "vase",
+  "traffic light",
+  "clock"
+ ],
+ "unseen": [
+  "painting, picture",
+  "field",
+  "seat",
+  "wardrobe, closet, press",
+  "lamp",
+  "tub",
+  "rail",
+  "base, pedestal, stand",
+  "box",
+  "column, pillar",
+  "signboard, sign",
+  "chest of drawers, chest, bureau, dresser",
+  "fireplace",
+  "grandstand, covered stand",
+  "path",
+  "runway",
+  "case, display case, showcase, vitrine",
+  "pool table, billiard table, snooker table",
+  "screen door, screen",
+  "bookcase",
+  "blind, screen",
+  "coffee table",
+  "stove",
+  "palm, palm tree",
+  "kitchen island",
+  "computer",
+  "bar",
+  "arcade machine",
+  "hovel, hut, hutch, shack, shanty",
+  "tower",
+  "chandelier",
+  "awning, sunshade, sunblind",
+  "street lamp",
+  "booth",
+  "plane",
+  "pole",
+  "escalator, moving staircase, moving stairway",
+  "ottoman, pouf, pouffe, puff, hassock",
+  "poster, posting, placard, notice, bill, card",
+  "stage",
+  "van",
+  "fountain",
+  "conveyer belt, conveyor belt, conveyer, conveyor, transporter",
+  "canopy",
+  "washer, automatic washer, washing machine",
+  "plaything, toy",
+  "pool",
+  "stool",
+  "barrel, cask",
+  "basket, handbasket",
+  "falls",
+  "bag",
+  "cradle",
+  "step, stair",
+  "tank, storage tank",
+  "trade name",
+  "pot",
+  "animal",
+  "lake",
+  "dishwasher",
+  "screen",
+  "sculpture",
+  "hood, exhaust hood",
+  "sconce",
+  "tray",
+  "trash can",
+  "fan",
+  "pier",
+  "crt screen",
+  "plate",
+  "monitor",
+  "bulletin board",
+  "shower",
+  "radiator",
+  "glass, drinking glass",
+  "flag"
+ ],
+ "classes": [
+  {
+   "id": 0,
+   "name": "wall",
+   "seen": true,
+   "coco_match": "wall-other",
+   "rule": "exact:wall"
+  },
+  {
+   "id": 1,
+   "name": "building",
+   "seen": true,
+   "coco_match": "building-other",
+   "rule": "exact:building"
+  },
+  {
+   "id": 2,
+   "name": "sky",
+   "seen": true,
+   "coco_match": "sky-other",
+   "rule": "exact:sky"
+  },
+  {
+   "id": 3,
+   "name": "floor",
+   "seen": true,
+   "coco_match": "floor-other",
+   "rule": "exact:floor"
+  },
+  {
+   "id": 4,
+   "name": "tree",
+   "seen": true,
+   "coco_match": "tree",
+   "rule": "exact:tree"
+  },
+  {
+   "id": 5,
+   "name": "ceiling",
+   "seen": true,
+   "coco_match": "ceiling-other",
+   "rule": "exact:ceiling"
+  },
+  {
+   "id": 6,
+   "name": "road, route",
+   "seen": true,
+   "coco_match": "road",
+   "rule": "exact:road"
+  },
+  {
+   "id": 7,
+   "name": "bed",
+   "seen": true,
+   "coco_match": "bed",
+   "rule": "exact:bed"
+  },
+  {
+   "id": 8,
+   "name": "window",
+   "seen": true,
+   "coco_match": "window-other",
+   "rule": "exact:window"
+  },
+  {
+   "id": 9,
+   "name": "grass",
+   "seen": true,
+   "coco_match": "grass",
+   "rule": "exact:grass"
+  },
+  {
+   "id": 10,
+   "name": "cabinet",
+   "seen": true,
+   "coco_match": "cabinet",
+   "rule": "exact:cabinet"
+  },
+  {
+   "id": 11,
+   "name": "sidewalk, pavement",
+   "seen": true,
+   "coco_match": "pavement",
+   "rule": "exact:pavement"
+  },
+  {
+   "id": 12,
+   "name": "person",
+   "seen": true,
+   "coco_match": "person",
+   "rule": "exact:person"
+  },
+  {
+   "id": 13,
+   "name": "earth, ground",
+   "seen": true,
+   "coco_match": "ground-other",
+   "rule": "exact:ground"
+  },
+  {
+   "id": 14,
+   "name": "door",
+   "seen": true,
+   "coco_match": "door-stuff",
+   "rule": "exact:door"
+  },
+  {
+   "id": 15,
+   "name": "table",
+   "seen": true,
+   "coco_match": "table",
+   "rule": "exact:table"
+  },
+  {
+   "id": 16,
+   "name": "mountain, mount",
+   "seen": true,
+   "coco_match": "mountain",
+   "rule": "exact:mountain"
+  },
+  {
+   "id": 17,
+   "name": "plant",
+   "seen": true,
+   "coco_match": "plant-other",
+   "rule": "exact:plant"
+  },
+  {
+   "id": 18,
+   "name": "curtain",
+   "seen": true,
+   "coco_match": "curtain",
+   "rule": "exact:curtain"
+  },
+  {
+   "id": 19,
+   "name": "chair",
+   "seen": true,
+   "coco_match": "chair",
+   "rule": "exact:chair"
+  },
+  {
+   "id": 20,
+   "name": "car",
+   "seen": true,
+   "coco_match": "car",
+   "rule": "exact:car"
+  },
+  {
+   "id": 21,
+   "name": "water",
+   "seen": true,
+   "coco_match": "water-other",
+   "rule": "exact:water"
+  },
+  {
+   "id": 22,
+   "name": "painting, picture",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 23,
+   "name": "sofa",
+   "seen": true,
+   "coco_match": "couch",
+   "rule": "synonym:sofa"
+  },
+  {
+   "id": 24,
+   "name": "shelf",
+   "seen": true,
+   "coco_match": "shelf",
+   "rule": "exact:shelf"
+  },
+  {
+   "id": 25,
+   "name": "house",
+   "seen": true,
+   "coco_match": "house",
+   "rule": "exact:house"
+  },
+  {
+   "id": 26,
+   "name": "sea",
+   "seen": true,
+   "coco_match": "sea",
+   "rule": "exact:sea"
+  },
+  {
+   "id": 27,
+   "name": "mirror",
+   "seen": true,
+   "coco_match": "mirror-stuff",
+   "rule": "exact:mirror"
+  },
+  {
+   "id": 28,
+   "name": "rug",
+   "seen": true,
+   "coco_match": "rug",
+   "rule": "exact:rug"
+  },
+  {
+   "id": 29,
+   "name": "field",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 30,
+   "name": "armchair",
+   "seen": true,
+   "coco_match": "chair",
+   "rule": "synonym:armchair"
+  },
+  {
+   "id": 31,
+   "name": "seat",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 32,
+   "name": "fence",
+   "seen": true,
+   "coco_match": "fence",
+   "rule": "exact:fence"
+  },
+  {
+   "id": 33,
+   "name": "desk",
+   "seen": true,
+   "coco_match": "desk-stuff",
+   "rule": "exact:desk"
+  },
+  {
+   "id": 34,
+   "name": "rock, stone",
+   "seen": true,
+   "coco_match": "rock",
+   "rule": "exact:rock"
+  },
+  {
+   "id": 35,
+   "name": "wardrobe, closet, press",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 36,
+   "name": "lamp",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 37,
+   "name": "tub",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 38,
+   "name": "rail",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 39,
+   "name": "cushion",
+   "seen": true,
+   "coco_match": "pillow",
+   "rule": "synonym:cushion"
+  },
+  {
+   "id": 40,
+   "name": "base, pedestal, stand",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 41,
+   "name": "box",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 42,
+   "name": "column, pillar",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 43,
+   "name": "signboard, sign",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 44,
+   "name": "chest of drawers, chest, bureau, dresser",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 45,
+   "name": "counter",
+   "seen": true,
+   "coco_match": "counter",
+   "rule": "exact:counter"
+  },
+  {
+   "id": 46,
+   "name": "sand",
+   "seen": true,
+   "coco_match": "sand",
+   "rule": "exact:sand"
+  },
+  {
+   "id": 47,
+   "name": "sink",
+   "seen": true,
+   "coco_match": "sink",
+   "rule": "exact:sink"
+  },
+  {
+   "id": 48,
+   "name": "skyscraper",
+   "seen": true,
+   "coco_match": "skyscraper",
+   "rule": "exact:skyscraper"
+  },
+  {
+   "id": 49,
+   "name": "fireplace",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 50,
+   "name": "refrigerator, icebox",
+   "seen": true,
+   "coco_match": "refrigerator",
+   "rule": "exact:refrigerator"
+  },
+  {
+   "id": 51,
+   "name": "grandstand, covered stand",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 52,
+   "name": "path",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 53,
+   "name": "stairs",
+   "seen": true,
+   "coco_match": "stairs",
+   "rule": "exact:stairs"
+  },
+  {
+   "id": 54,
+   "name": "runway",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 55,
+   "name": "case, display case, showcase, vitrine",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 56,
+   "name": "pool table, billiard table, snooker table",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 57,
+   "name": "pillow",
+   "seen": true,
+   "coco_match": "pillow",
+   "rule": "exact:pillow"
+  },
+  {
+   "id": 58,
+   "name": "screen door, screen",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 59,
+   "name": "stairway, staircase",
+   "seen": true,
+   "coco_match": "stairs",
+   "rule": "synonym:stairway"
+  },
+  {
+   "id": 60,
+   "name": "river",
+   "seen": true,
+   "coco_match": "river",
+   "rule": "exact:river"
+  },
+  {
+   "id": 61,
+   "name": "bridge, span",
+   "seen": true,
+   "coco_match": "bridge",
+   "rule": "exact:bridge"
+  },
+  {
+   "id": 62,
+   "name": "bookcase",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 63,
+   "name": "blind, screen",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 64,
+   "name": "coffee table",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 65,
+   "name": "toilet, can, commode, crapper, pot, potty, stool, throne",
+   "seen": true,
+   "coco_match": "toilet",
+   "rule": "exact:toilet"
+  },
+  {
+   "id": 66,
+   "name": "flower",
+   "seen": true,
+   "coco_match": "flower",
+   "rule": "exact:flower"
+  },
+  {
+   "id": 67,
+   "name": "book",
+   "seen": true,
+   "coco_match": "book",
+   "rule": "exact:book"
+  },
+  {
+   "id": 68,
+   "name": "hill",
+   "seen": true,
+   "coco_match": "hill",
+   "rule": "exact:hill"
+  },
+  {
+   "id": 69,
+   "name": "bench",
+   "seen": true,
+   "coco_match": "bench",
+   "rule": "exact:bench"
+  },
+  {
+   "id": 70,
+   "name": "countertop",
+   "seen": true,
+   "coco_match": "counter",
+   "rule": "synonym:countertop"
+  },
+  {
+   "id": 71,
+   "name": "stove",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 72,
+   "name": "palm, palm tree",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 73,
+   "name": "kitchen island",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 74,
+   "name": "computer",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 75,
+   "name": "swivel chair",
+   "seen": true,
+   "coco_match": "chair",
+   "rule": "synonym:swivel chair"
+  },
+  {
+   "id": 76,
+   "name": "boat",
+   "seen": true,
+   "coco_match": "boat",
+   "rule": "exact:boat"
+  },
+  {
+   "id": 77,
+   "name": "bar",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 78,
+   "name": "arcade machine",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 79,
+   "name": "hovel, hut, hutch, shack, shanty",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 80,
+   "name": "bus",
+   "seen": true,
+   "coco_match": "bus",
+   "rule": "exact:bus"
+  },
+  {
+   "id": 81,
+   "name": "towel",
+   "seen": true,
+   "coco_match": "towel",
+   "rule": "exact:towel"
+  },
+  {
+   "id": 82,
+   "name": "light",
+   "seen": true,
+   "coco_match": "light",
+   "rule": "exact:light"
+  },
+  {
+   "id": 83,
+   "name": "truck",
+   "seen": true,
+   "coco_match": "truck",
+   "rule": "exact:truck"
+  },
+  {
+   "id": 84,
+   "name": "tower",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 85,
+   "name": "chandelier",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 86,
+   "name": "awning, sunshade, sunblind",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 87,
+   "name": "street lamp",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 88,
+   "name": "booth",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 89,
+   "name": "tv",
+   "seen": true,
+   "coco_match": "tv",
+   "rule": "exact:tv"
+  },
+  {
+   "id": 90,
+   "name": "plane",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 91,
+   "name": "dirt track",
+   "seen": true,
+   "coco_match": "dirt",
+   "rule": "synonym:dirt track"
+  },
+  {
+   "id": 92,
+   "name": "clothes",
+   "seen": true,
+   "coco_match": "clothes",
+   "rule": "exact:clothes"
+  },
+  {
+   "id": 93,
+   "name": "pole",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 94,
+   "name": "land, ground, soil",
+   "seen": true,
+   "coco_match": "ground-other",
+   "rule": "exact:ground"
+  },
+  {
+   "id": 95,
+   "name": "bannister, banister, balustrade, balusters, handrail",
+   "seen": true,
+   "coco_match": "railing",
+   "rule": "synonym:bannister"
+  },
+  {
+   "id": 96,
+   "name": "escalator, moving staircase, moving stairway",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 97,
+   "name": "ottoman, pouf, pouffe, puff, hassock",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 98,
+   "name": "bottle",
+   "seen": true,
+   "coco_match": "bottle",
+   "rule": "exact:bottle"
+  },
+  {
+   "id": 99,
+   "name": "buffet, counter, sideboard",
+   "seen": true,
+   "coco_match": "counter",
+   "rule": "exact:counter"
+  },
+  {
+   "id": 100,
+   "name": "poster, posting, placard, notice, bill, card",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 101,
+   "name": "stage",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 102,
+   "name": "van",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 103,
+   "name": "ship",
+   "seen": true,
+   "coco_match": "boat",
+   "rule": "synonym:ship"
+  },
+  {
+   "id": 104,
+   "name": "fountain",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 105,
+   "name": "conveyer belt, conveyor belt, conveyer, conveyor, transporter",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 106,
+   "name": "canopy",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 107,
+   "name": "washer, automatic washer, washing machine",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 108,
+   "name": "plaything, toy",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 109,
+   "name": "pool",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 110,
+   "name": "stool",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 111,
+   "name": "barrel, cask",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 112,
+   "name": "basket, handbasket",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 113,
+   "name": "falls",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 114,
+   "name": "tent",
+   "seen": true,
+   "coco_match": "tent",
+   "rule": "exact:tent"
+  },
+  {
+   "id": 115,
+   "name": "bag",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 116,
+   "name": "minibike, motorbike",
+   "seen": true,
+   "coco_match": "motorcycle",
+   "rule": "synonym:minibike"
+  },
+  {
+   "id": 117,
+   "name": "cradle",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 118,
+   "name": "oven",
+   "seen": true,
+   "coco_match": "oven",
+   "rule": "exact:oven"
+  },
+  {
+   "id": 119,
+   "name": "ball",
+   "seen": true,
+   "coco_match": "sports ball",
+   "rule": "synonym:ball"
+  },
+  {
+   "id": 120,
+   "name": "food, solid food",
+   "seen": true,
+   "coco_match": "food-other",
+   "rule": "exact:food"
+  },
+  {
+   "id": 121,
+   "name": "step, stair",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 122,
+   "name": "tank, storage tank",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 123,
+   "name": "trade name",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 124,
+   "name": "microwave",
+   "seen": true,
+   "coco_match": "microwave",
+   "rule": "exact:microwave"
+  },
+  {
+   "id": 125,
+   "name": "pot",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 126,
+   "name": "animal",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 127,
+   "name": "bicycle",
+   "seen": true,
+   "coco_match": "bicycle",
+   "rule": "exact:bicycle"
+  },
+  {
+   "id": 128,
+   "name": "lake",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 129,
+   "name": "dishwasher",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 130,
+   "name": "screen",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 131,
+   "name": "blanket, cover",
+   "seen": true,
+   "coco_match": "blanket",
+   "rule": "exact:blanket"
+  },
+  {
+   "id": 132,
+   "name": "sculpture",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 133,
+   "name": "hood, exhaust hood",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 134,
+   "name": "sconce",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 135,
+   "name": "vase",
+   "seen": true,
+   "coco_match": "vase",
+   "rule": "exact:vase"
+  },
+  {
+   "id": 136,
+   "name": "traffic light",
+   "seen": true,
+   "coco_match": "traffic light",
+   "rule": "exact:traffic light"
+  },
+  {
+   "id": 137,
+   "name": "tray",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 138,
+   "name": "trash can",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 139,
+   "name": "fan",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 140,
+   "name": "pier",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 141,
+   "name": "crt screen",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 142,
+   "name": "plate",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 143,
+   "name": "monitor",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 144,
+   "name": "bulletin board",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 145,
+   "name": "shower",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 146,
+   "name": "radiator",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 147,
+   "name": "glass, drinking glass",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 148,
+   "name": "clock",
+   "seen": true,
+   "coco_match": "clock",
+   "rule": "exact:clock"
+  },
+  {
+   "id": 149,
+   "name": "flag",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  }
+ ]
+}

@@ -1,0 +1,44 @@
+# Manual synonym table for the seen/unseen split.
+# key   = a target-dataset class name (or one of its comma-separated synonyms), normalised
+#         (lower case, '-'/'_' -> space)
+# value = the COCO-Stuff raw class name it counts as.
+#
+# Exact matches (including the cleaned COCO-Stuff names, e.g. 'wall-other' == 'wall')
+# need no entry. Only add near-identical concepts here: anything left out is UNSEEN,
+# so this list decides how strict the "unseen" numbers are. Edit, then re-run
+# tools/mask_cls/build_splits.py and check the generated <dataset>.json files.
+synonyms:
+  # Pascal VOC
+  aeroplane: airplane
+  diningtable: dining table
+  motorbike: motorcycle
+  pottedplant: potted plant
+  sofa: couch
+  tvmonitor: tv
+  tv monitor: tv
+  # ADE20K (150 and 847)
+  windowpane: window-other
+  sidewalk: pavement
+  earth: ground-other
+  land: ground-other
+  stairway: stairs
+  staircase: stairs
+  television receiver: tv
+  television: tv
+  countertop: counter
+  bannister: railing
+  minibike: motorcycle
+  ship: boat
+  armchair: chair
+  swivel chair: chair
+  flowerpot: potted plant
+  ball: sports ball
+  dirt track: dirt
+  cushion: pillow
+  computer mouse: mouse
+  cellular telephone: cell phone
+  refrigerator: refrigerator
+  icebox: refrigerator
+  dining table: dining table
+  automobile: car
+  motorcar: car

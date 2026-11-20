@@ -1,0 +1,94 @@
+# Stage 1: mask classification on GT masks. Every key can be overridden on the
+# command line, e.g.  align.method=procrustes student.timestep=0.1 teacher.dense.mode=sclip
+seed: 0
+
+paths:
+  datasets_root: ${DETECTRON2_DATASETS}   # folder holding coco/, ADEChallengeData2016/, ADE20K_2021_17_01/, VOC2012/
+  cache_root: cache/mask_cls
+  results_dir: output/mask_cls
+
+data:
+  train:
+    name: coco_2017_train_stuff_sem_seg   # COCO-Stuff-164k, 171 classes (things + stuff)
+    max_images: 50000      # fit pool (seeded random subset); null = all 118k. Data scaling uses align.train_images
+    holdout_images: 2000   # held-out COCO train images for model selection (lambda, epochs)
+    min_area: 256          # drop tiny training regions (pixels at GT resolution); eval keeps every region
+  eval:
+    - coco_2017_test_stuff_sem_seg   # COCO-Stuff val2017 (seen)
+    - ade20k_sem_seg_val             # ADE20K-150
+    - ade20k_full_sem_seg_val        # ADE20K-847 (skipped with a warning if not prepared)
+    - voc_sem_seg_val                # Pascal VOC (20 classes, background ignored)
+  seen_reference: coco_2017_train_stuff_sem_seg
+  synonyms_file: configs/mask_cls/class_splits/synonyms.yaml
+  splits_dir: configs/mask_cls/class_splits
+  class_names: {}          # dataset -> JSON list of prompt names (CAT-Seg style), overrides the built-in cleaning
+  num_workers: 6
+
+student:
+  checkpoint: t2i/pixeldit_t2i_v1.pth   # downloaded from nvidia/PixelDiT-1300M-1024px if missing
+  model_config: diffusion_configs/PixelDiT_1024px_pixel_diffusion_stage3.yaml
+  num_blocks: 4            # PixelDiT patch blocks built and run (of 14)
+  layers: [0, 1, 2, 3]     # blocks whose outputs are cached; align.features picks from these
+  timestep: 0.002          # flow time t (model input t*1000); t=0 is the clean image
+  noise: false             # true: feed x_t = (1-t) x + t eps (seeded per image)
+  prompt: ""               # "" = empty/unconditional prompt; any string = fixed prompt
+  captions_file: null      # JSON {image file name: caption} -> per-image caption conditioning
+  mask_text_padding: true
+  pixel_pathway: false     # also run the 2 PiT pixel blocks (conditioned on the last built block)
+  target_area: 1048576     # resize so H*W ~ 1024^2 (PixelDiT's training area), aspect kept, multiples of 16
+  max_side: 2048
+  dtype: bfloat16
+  cache_dtype: float16     # dtype of the cached pooled features; bfloat16 if activations exceed fp16 range
+
+teacher:
+  model: ViT-B-16          # OpenCLIP name: ViT-B-16, ViT-L-14, convnext_large_d_320, ...
+  pretrained: openai       # e.g. openai, laion2b_s34b_b88k, laion2b_s29b_b131k_ft_soup
+  dtype: float16
+  crop:
+    margin: 0.1            # relative to the bbox side
+    background: gray       # gray | blur | none
+    blur_sigma: 8.0
+    square: true
+    batch_size: 128
+  dense:
+    mode: clearclip        # maskclip | clearclip | sclip | corrclip
+    short_side: 448
+    token_norm: false
+    corrclip:              # used when mode=corrclip (mask_cls/teacher/corrclip.py)
+      similarity: dino     # dino (DINO ViT-B/8 q+k, paper) | clip_qq | uniform
+      dino_model: dino_vitb8
+      tau: 0.25            # paper value
+      min_cover: 0.5       # a patch joins the GT region covering most of it if regions cover >= this
+      unassigned: above_mean   # patches outside all regions: above_mean (paper) | self | all
+      spatial_alpha: 0.0   # paper: 1.0 (spatial branch)
+      spatial_layers: [-4] # lower-layer outputs for the spatial branch (the paper does not say which)
+      mct_beta: 0.0        # paper: 0.5 (mask class tokens)
+
+text:
+  templates: vild          # vild (14) | imagenet (80) | single
+  synonyms: ensemble       # ensemble | first (for comma-separated names, e.g. ADE-847)
+
+align:
+  name: null               # run name; auto-generated when null
+  features: [patch.3]      # e.g. [patch.3], [patch.1, patch.3], [pit_attn.1]
+  method: ridge            # ridge | procrustes | linear | mlp
+  target: avg              # teacher target: crop | dense | avg
+  train_images: null       # use the first K fit images (data scaling); null = all
+  ridge:
+    alphas: [1.0e-5, 1.0e-4, 1.0e-3, 3.0e-3, 1.0e-2, 3.0e-2, 0.1, 0.3, 1.0]   # lambda = alpha * N
+  sgd:
+    epochs: 20
+    batch_size: 4096
+    lr: 1.0e-3
+    weight_decay: 1.0e-4
+    distill_weight: 1.0    # cosine distillation to the teacher target
+    ce_weight: 0.0         # auxiliary CE vs frozen COCO text embeddings
+    ce_temperature: 0.01
+    init: ridge            # ridge | random (linear/mlp start from the best ridge solution)
+    mlp_hidden: 2048
+    mlp_dropout: 0.1
+
+eval:
+  topk: [1, 5]
+  student_scoring: [raw, rescale, center]   # see mask_cls/align/scoring.py
+  temperature: 0.01        # only for calibrated scores; top-k and oracle mIoU do not depend on it

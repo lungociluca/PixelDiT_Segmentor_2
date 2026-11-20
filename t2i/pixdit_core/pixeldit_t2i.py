@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple
+from typing import Optional, Tuple
 
 from .pixeldit_c2i import PatchTokenEmbedder, PixelTokenEmbedder, PiTBlock
 from .modules import (
@@ -158,6 +158,8 @@ class PixDiT_T2I(nn.Module):
         repa_encoder_index: int = -1,
         use_pixel_abs_pos: bool = True,
         pit_adaln_post_modulation: bool = False,
+        num_patch_blocks: Optional[int] = None,
+        build_pixel_blocks: bool = False,
     ):
         super().__init__()
         self.in_channels = int(in_channels)
@@ -188,6 +190,10 @@ class PixDiT_T2I(nn.Module):
         self._shared_cond_adaln = None
         self._shared_cond_adaln_img = None
         self._shared_cond_adaln_txt = None
+        # Only the first `num_patch_blocks` blocks are built (and run); the rest of
+        # the checkpoint is ignored. Defaults to t2i.config.layer_count.
+        n_blocks = local_config.layer_count if num_patch_blocks is None else int(num_patch_blocks)
+        self.num_built_blocks = max(1, min(self.patch_depth, n_blocks))
         self.patch_blocks = nn.ModuleList([
             MMDiTBlockT2I(
                 self.hidden_size,
@@ -196,13 +202,35 @@ class PixDiT_T2I(nn.Module):
                 adaLN_modulation_txt=self._shared_cond_adaln_txt,
                 block_id=i
             )
-            for i in range(min(self.patch_depth, local_config.layer_count))
+            for i in range(self.num_built_blocks)
         ])
         self.text_refine_blocks = None
         self.pixel_attn_hidden_size = (
             int(pixel_attn_hidden_size) if pixel_attn_hidden_size is not None else self.hidden_size
         )
         self.pixel_num_groups = int(pixel_num_groups) if pixel_num_groups is not None else self.num_groups
+        # Pixel pathway (PiT blocks). Off by default. When on, it is conditioned on
+        # the output of the LAST BUILT patch block. With fewer than `patch_depth`
+        # blocks that is not what the pixel blocks saw in pretraining, so treat
+        # its features as an ablation.
+        self.pixel_blocks = None
+        if build_pixel_blocks:
+            self.pixel_blocks = nn.ModuleList(
+                [
+                    PiTBlock(
+                        self.pixel_hidden_size,
+                        self.hidden_size,
+                        patch_size=self.patch_size,
+                        num_heads=self.num_groups,
+                        mlp_ratio=4.0,
+                        attn_hidden_size=self.pixel_attn_hidden_size,
+                        attn_num_heads=self.pixel_num_groups,
+                        rope_fn=precompute_freqs_cis_2d,
+                        adaln_post_modulation=self.pit_adaln_post_modulation,
+                    )
+                    for _ in range(self.pixel_depth)
+                ]
+            )
         # self.pixel_blocks = nn.ModuleList(
         #     [
         #         PiTBlock(
@@ -274,7 +302,11 @@ class PixDiT_T2I(nn.Module):
             raise ValueError("Text embedding y must be [B, L, D]")
         Ltxt = min(y.shape[1], self.txt_max_length)  # same as upstream: keep all 300 tokens
         y = y[:, :Ltxt, :]
-        y_emb = self.y_embedder(y.to(local_config.device, dtype=x.dtype)).view(1, Ltxt, self.hidden_size).expand((B, -1, -1))
+        y_emb = self.y_embedder(y.to(x.device, dtype=x.dtype)).view(-1, Ltxt, self.hidden_size)
+        if y_emb.shape[0] == 1 and B > 1:
+            y_emb = y_emb.expand((B, -1, -1))  # one prompt shared by the whole batch
+        elif y_emb.shape[0] != B:
+            raise ValueError(f"Got {y_emb.shape[0]} prompts for a batch of {B} images")
         y_emb = y_emb + self.y_pos_embedding[:, :Ltxt, :].to(y_emb.dtype)
 
         condition = torch.nn.functional.silu(t_emb)
@@ -308,7 +340,7 @@ class PixDiT_T2I(nn.Module):
             self.last_repa_tokens = None
             s = s0
 
-            for i in range(min(self.patch_depth, local_config.layer_count)):
+            for i in range(self.num_built_blocks):
                 s, y_emb = self.patch_blocks[i](s, y_emb, condition, pos, pos_txt, attn_mask_joint)
                 if 0 < self.repa_encoder_index == (i + 1):
                     self.last_repa_tokens = s
@@ -317,4 +349,17 @@ class PixDiT_T2I(nn.Module):
 
             if segment_data is not None:
                 segment_data["patch_features"] = torch.stack(patch_features, dim=1)
+
+            if segment_data is not None and segment_data.get("want_pixel_features") and self.pixel_blocks is not None:
+                # Same conditioning as the c2i model: silu(t_emb + patch tokens).
+                s_cond = torch.nn.functional.silu(t_emb + s).reshape(B * L, self.hidden_size)
+                x_pix = self.pixel_embedder(x, img_height=H, img_width=W, patch_size=self.patch_size)
+                pixel_features = []
+                for blk in self.pixel_blocks:
+                    x_pix = blk(x_pix, s_cond, H, W, self.patch_size, None)
+                    # (B*L, P2, C) -> (B, H, W, C)
+                    p = self.patch_size
+                    f = x_pix.view(B, Hs, Ws, p, p, self.pixel_hidden_size).permute(0, 1, 3, 2, 4, 5)
+                    pixel_features.append(f.reshape(B, H, W, self.pixel_hidden_size))
+                segment_data["pixel_features"] = torch.stack(pixel_features, dim=1)  # (B, n, H, W, C)
         return x

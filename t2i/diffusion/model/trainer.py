@@ -66,6 +66,8 @@ class PixDiTTrainer(nn.Module):
         repa_encoder_index = int(extra.get("repa_encoder_index", -1))
         use_pixel_abs_pos = bool(extra.get("use_pixel_abs_pos", True))
         pit_adaln_post_modulation = bool(extra.get("pit_adaln_post_modulation", False))
+        num_patch_blocks = extra.get("num_patch_blocks", None)
+        build_pixel_blocks = bool(extra.get("build_pixel_blocks", False))
 
         if PixDiT_T2I is None:
             raise ImportError("Failed to import PixDiT_T2I from pixdit_core.pixeldit_t2i. Check repo layout and PYTHONPATH.")
@@ -87,6 +89,8 @@ class PixDiTTrainer(nn.Module):
             repa_encoder_index=repa_encoder_index,
             use_pixel_abs_pos=use_pixel_abs_pos,
             pit_adaln_post_modulation=pit_adaln_post_modulation,
+            num_patch_blocks=num_patch_blocks,
+            build_pixel_blocks=build_pixel_blocks,
         )
 
         # If True, forward() passes the text attention mask to the core so image

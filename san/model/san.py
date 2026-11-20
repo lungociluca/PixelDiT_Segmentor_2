@@ -165,7 +165,8 @@ def get_model():
     logger.info(
         f"{model.__class__.__name__}:{config.model.model}, Model Parameters: {sum(p.numel() for p in model.parameters()):,}"
     )
-    state_dict = torch.load("t2i/pixeldit_t2i_v1.pth", map_location=lambda storage, loc: storage)
+    # Use the resolved path (local file or the Hugging Face cache), not the literal one.
+    state_dict = torch.load(args.model_path, map_location=lambda storage, loc: storage)
     if "pos_embed" in state_dict["state_dict"]:
         del state_dict["state_dict"]["pos_embed"]
 

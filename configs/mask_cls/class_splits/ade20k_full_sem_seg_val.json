@@ -1,0 +1,6788 @@
+{
+ "dataset": "ade20k_full_sem_seg_val",
+ "reference": "coco_stuff_171",
+ "num_seen": 123,
+ "num_unseen": 724,
+ "seen": [
+  "wall",
+  "building, edifice",
+  "sky",
+  "tree",
+  "road, route",
+  "floor, flooring",
+  "ceiling",
+  "bed",
+  "sidewalk, pavement",
+  "earth, ground",
+  "cabinet",
+  "person, individual, someone, somebody, mortal, soul",
+  "grass",
+  "windowpane, window",
+  "car, auto, automobile, machine, motorcar",
+  "mountain, mount",
+  "plant, flora, plant life",
+  "table",
+  "chair",
+  "curtain, drape, drapery, mantle, pall",
+  "door",
+  "sofa, couch, lounge",
+  "sea",
+  "water",
+  "mirror",
+  "house",
+  "rug, carpet, carpeting",
+  "shelf",
+  "armchair",
+  "fence, fencing",
+  "rock, stone",
+  "river",
+  "desk",
+  "railing, rail",
+  "cushion",
+  "stairs, steps",
+  "sink",
+  "snow",
+  "refrigerator, icebox",
+  "bridge, span",
+  "sand",
+  "pillow",
+  "toilet, can, commode, crapper, pot, potty, stool, throne",
+  "skyscraper",
+  "counter",
+  "countertop",
+  "boat",
+  "flower",
+  "book",
+  "stairway, staircase",
+  "bus, autobus, coach, charabanc, double-decker, jitney, motorbus, motorcoach, omnibus, passenger vehicle",
+  "swivel chair",
+  "light, light source",
+  "bench",
+  "towel",
+  "television receiver, television, television set, tv, tv set, idiot box, boob tube, telly, goggle box",
+  "hill",
+  "truck, motortruck",
+  "airplane, aeroplane, plane",
+  "ball",
+  "buffet, counter, sideboard",
+  "apparel, wearing apparel, dress, clothes",
+  "minibike, motorbike",
+  "bicycle, bike, wheel, cycle",
+  "bannister, banister, balustrade, balusters, handrail",
+  "traffic light, traffic signal, stoplight",
+  "land, ground, soil",
+  "ship",
+  "bottle",
+  "pot, flowerpot",
+  "train, railroad train",
+  "tent, collapsible shelter",
+  "microwave, microwave oven",
+  "dirt track",
+  "blanket, cover",
+  "food, solid food",
+  "oven",
+  "umbrella",
+  "horse, equus caballus",
+  "vase",
+  "paper",
+  "bowl",
+  "bag, traveling bag, travelling bag, grip, suitcase",
+  "laptop, laptop computer",
+  "platform",
+  "clock",
+  "fruit",
+  "net",
+  "backpack, back pack, knapsack, packsack, rucksack, haversack",
+  "roof",
+  "banner, streamer",
+  "bag, handbag, pocketbook, purse",
+  "dog, domestic dog, canis familiaris",
+  "straw",
+  "structure",
+  "bird",
+  "cage",
+  "mat",
+  "napkin, table napkin, serviette",
+  "fabric, cloth, material, textile",
+  "keyboard",
+  "wood",
+  "newspaper, paper",
+  "leaves",
+  "cup",
+  "parking meter",
+  "patty, cake",
+  "toaster",
+  "knife",
+  "fireplug, fire hydrant, plug",
+  "plastic",
+  "cardboard",
+  "hair dryer",
+  "remote control, remote",
+  "cat",
+  "branch",
+  "fork",
+  "spoon",
+  "mouse, computer mouse",
+  "cellular telephone, cellular phone, cellphone, cell, mobile phone",
+  "scissors",
+  "andiron, firedog, dog, dog-iron",
+  "tie"
+ ],
+ "unseen": [
+  "painting, picture",
+  "field",
+  "lamp",
+  "seat",
+  "bathtub, bathing tub, bath, tub",
+  "signboard, sign",
+  "path",
+  "work surface",
+  "column, pillar",
+  "wardrobe, closet, press",
+  "base, pedestal, stand",
+  "blind, screen",
+  "runway",
+  "cliff, drop, drop-off",
+  "fireplace, hearth, open fireplace",
+  "screen door, screen",
+  "grandstand, covered stand",
+  "box",
+  "pool table, billiard table, snooker table",
+  "palm, palm tree",
+  "double door",
+  "coffee table, cocktail table",
+  "chest of drawers, chest, bureau, dresser",
+  "kitchen island",
+  "waterfall, falls",
+  "stove, kitchen stove, range, kitchen range, cooking stove",
+  "bookcase",
+  "controls",
+  "streetlight, street lamp",
+  "computer, computing machine, computing device, data processor, electronic computer, information processing system",
+  "case, display case, showcase, vitrine",
+  "fountain",
+  "embankment",
+  "van",
+  "awning, sunshade, sunblind",
+  "poster, posting, placard, notice, bill, card",
+  "pole",
+  "tower",
+  "court",
+  "aircraft carrier, carrier, flattop, attack aircraft carrier",
+  "hovel, hut, hutch, shack, shanty",
+  "animal, animate being, beast, brute, creature, fauna",
+  "chandelier, pendant, pendent",
+  "step, stair",
+  "booth, cubicle, stall, kiosk",
+  "doorframe, doorcase",
+  "sconce",
+  "pond",
+  "trade name, brand name, brand, marque",
+  "bag",
+  "gazebo",
+  "escalator, moving staircase, moving stairway",
+  "board, plank",
+  "arcade machine",
+  "eiderdown, duvet, continental quilt",
+  "bar",
+  "stall, stand, sales booth",
+  "playground",
+  "ottoman, pouf, pouffe, puff, hassock",
+  "ashcan, trash can, garbage can, wastebin, ash bin, ash-bin, ashbin, dustbin, trash barrel, trash bin",
+  "cradle",
+  "conveyer belt, conveyor belt, conveyer, conveyor, transporter",
+  "stool",
+  "lake",
+  "tank, storage tank",
+  "ice, water ice",
+  "basket, handbasket",
+  "manhole",
+  "canopy",
+  "barrel, cask",
+  "beam",
+  "dishwasher, dish washer, dishwashing machine",
+  "plate",
+  "screen, crt screen",
+  "ruins",
+  "washer, automatic washer, washing machine",
+  "plaything, toy",
+  "screen, silver screen, projection screen",
+  "stage",
+  "beacon, lighthouse, beacon light, pharos",
+  "sculpture",
+  "aqueduct",
+  "container",
+  "scaffolding, staging",
+  "hood, exhaust hood",
+  "curb, curbing, kerb",
+  "roller coaster",
+  "catwalk",
+  "glass, drinking glass",
+  "central reservation",
+  "carousel",
+  "radiator",
+  "closet",
+  "machine",
+  "pier, wharf, wharfage, dock",
+  "fan",
+  "inflatable bounce game",
+  "pitch",
+  "arcade, colonnade",
+  "hot tub",
+  "helicopter",
+  "tray",
+  "partition, divider",
+  "vineyard",
+  "bullring",
+  "flag",
+  "pot",
+  "footbridge, overcrossing, pedestrian bridge",
+  "shower",
+  "bulletin board, notice board",
+  "confessional booth",
+  "trunk, tree trunk, bole",
+  "forest",
+  "elevator door",
+  "instrument panel",
+  "bucket, pail",
+  "tapestry, tapis",
+  "jacket",
+  "gate",
+  "monitor, monitoring device",
+  "telephone booth, phone booth, call box, telephone box, telephone kiosk",
+  "spotlight, spot",
+  "ring",
+  "control panel",
+  "blackboard, chalkboard",
+  "air conditioner, air conditioning",
+  "chest",
+  "sand dune",
+  "pipe, pipage, piping",
+  "vault",
+  "table football",
+  "cannon",
+  "swimming pool, swimming bath, natatorium",
+  "fluorescent, fluorescent fixture",
+  "statue",
+  "loudspeaker, speaker, speaker unit, loudspeaker system, speaker system",
+  "exhibitor",
+  "ladder",
+  "carport",
+  "dam",
+  "pulpit",
+  "skylight, fanlight",
+  "water tower",
+  "grill, grille, grillwork",
+  "display board",
+  "pane, pane of glass, window glass",
+  "rubbish, trash, scrap",
+  "ice rink",
+  "patio",
+  "vending machine",
+  "telephone, phone, telephone set",
+  "jar",
+  "track",
+  "magazine",
+  "shutter",
+  "landfill",
+  "post",
+  "altarpiece, reredos",
+  "hat, chapeau, lid",
+  "arch, archway",
+  "table game",
+  "document, written document, papers",
+  "dome",
+  "pier",
+  "shanties",
+  "forecourt",
+  "crane",
+  "piano, pianoforte, forte-piano",
+  "drawing",
+  "cabin",
+  "ad, advertisement, advertizement, advertising, advertizing, advert",
+  "amphitheater, amphitheatre, coliseum",
+  "monument",
+  "henhouse",
+  "cockpit",
+  "heater, warmer",
+  "windmill, aerogenerator, wind generator",
+  "pool",
+  "elevator, lift",
+  "decoration, ornament, ornamentation",
+  "labyrinth",
+  "text, textual matter",
+  "printer",
+  "mezzanine, first balcony",
+  "mattress",
+  "stalls",
+  "patio, terrace",
+  "billboard, hoarding",
+  "bus stop",
+  "trouser, pant",
+  "console table, console",
+  "rack",
+  "notebook",
+  "shrine",
+  "pantry",
+  "cart",
+  "steam shovel",
+  "porch",
+  "postbox, mailbox, letter box",
+  "figurine, statuette",
+  "recycling bin",
+  "folding screen",
+  "telescope",
+  "deck chair, beach chair",
+  "kennel",
+  "coffee maker",
+  "altar, communion table, lord's table",
+  "fish",
+  "easel",
+  "artificial golf green",
+  "iceberg",
+  "candlestick, candle holder",
+  "shower stall, shower bath",
+  "television stand",
+  "wall socket, wall plug, electric outlet, electrical outlet, outlet, electric receptacle",
+  "skeleton",
+  "grand piano, grand",
+  "candy, confect",
+  "grille door",
+  "pedestal, plinth, footstall",
+  "jersey, t-shirt, tee shirt",
+  "shoe",
+  "gravestone, headstone, tombstone",
+  "shanty",
+  "rocking chair, rocker",
+  "place mat",
+  "tomb",
+  "big top",
+  "gas pump, gasoline pump, petrol pump, island dispenser",
+  "lockers",
+  "finger",
+  "bleachers",
+  "ferris wheel",
+  "hairdresser chair",
+  "stands",
+  "aquarium, fish tank, marine museum",
+  "streetcar, tram, tramcar, trolley, trolley car",
+  "dummy",
+  "booklet, brochure, folder, leaflet, pamphlet",
+  "sand trap",
+  "shop, store",
+  "table cloth",
+  "service station",
+  "coffin",
+  "drawer",
+  "cages",
+  "slot machine, coin machine",
+  "balcony",
+  "volleyball court",
+  "table tennis",
+  "control table",
+  "shirt",
+  "merchandise, ware, product",
+  "railway",
+  "parterre",
+  "chimney",
+  "can, tin, tin can",
+  "tanks",
+  "alga, algae",
+  "system",
+  "map",
+  "greenhouse",
+  "mug",
+  "barbecue",
+  "trailer",
+  "toilet tissue, toilet paper, bathroom tissue",
+  "organ",
+  "dishrag, dishcloth",
+  "island",
+  "trench",
+  "basket, basketball hoop, hoop",
+  "steering wheel, wheel",
+  "pitcher, ewer",
+  "goal",
+  "bread, breadstuff, staff of life",
+  "beds",
+  "file cabinet",
+  "motorboat",
+  "rope",
+  "guitar",
+  "rubble",
+  "scarf",
+  "barrels",
+  "cap",
+  "control tower",
+  "dashboard",
+  "bandstand",
+  "lectern",
+  "switch, electric switch, electrical switch",
+  "baseboard, mopboard, skirting board",
+  "shower room",
+  "smoke",
+  "faucet, spigot",
+  "bulldozer",
+  "saucepan",
+  "shops",
+  "meter",
+  "crevasse",
+  "gear",
+  "candelabrum, candelabra",
+  "sofa bed",
+  "tunnel",
+  "pallet",
+  "wire, conducting wire",
+  "kettle, boiler",
+  "bidet",
+  "baby buggy, baby carriage, carriage, perambulator, pram, stroller, go-cart, pushchair, pusher",
+  "music stand",
+  "pipe, tube",
+  "ice hockey rink",
+  "shelter",
+  "weeds",
+  "temple",
+  "ski slope",
+  "panel",
+  "wallet",
+  "wheel",
+  "towel rack, towel horse",
+  "roundabout",
+  "canister, cannister, tin",
+  "rod",
+  "soap dispenser",
+  "bell",
+  "canvas",
+  "box office, ticket office, ticket booth",
+  "teacup",
+  "trellis",
+  "workbench",
+  "valley, vale",
+  "podium",
+  "ramp",
+  "tumble dryer",
+  "gym shoe, sneaker, tennis shoe",
+  "lab bench",
+  "equipment",
+  "rocky formation",
+  "calendar",
+  "caravan",
+  "check-in-desk",
+  "ticket counter",
+  "brush",
+  "mill",
+  "covered bridge",
+  "bowling alley",
+  "hanger",
+  "excavator",
+  "trestle",
+  "revolving door",
+  "blast furnace",
+  "scale, weighing machine",
+  "projector",
+  "soap",
+  "locker",
+  "tractor",
+  "stretcher",
+  "frame",
+  "grating",
+  "alembic",
+  "candle, taper, wax light",
+  "barrier",
+  "cave",
+  "puddle",
+  "tarp",
+  "price tag",
+  "watchtower",
+  "meters",
+  "light bulb, lightbulb, bulb, incandescent lamp, electric light, electric-light bulb",
+  "tracks",
+  "skirt",
+  "viaduct",
+  "paper towel",
+  "coat",
+  "sheet",
+  "fire extinguisher, extinguisher, asphyxiator",
+  "water wheel",
+  "pottery, clayware",
+  "magazine rack",
+  "teapot",
+  "microphone, mike",
+  "support",
+  "forklift",
+  "canyon",
+  "cash register, register",
+  "leaf, leafage, foliage",
+  "soap dish",
+  "windshield, windscreen",
+  "cue, cue stick, pool cue, pool stick",
+  "vent, venthole, vent-hole, blowhole",
+  "videos",
+  "shovel",
+  "eaves",
+  "antenna, aerial, transmitting aerial",
+  "shipyard",
+  "hen, biddy",
+  "traffic cone",
+  "washing machines",
+  "truck crane",
+  "cds",
+  "niche",
+  "scoreboard",
+  "briefcase",
+  "boot",
+  "sweater, jumper",
+  "hay",
+  "pack",
+  "bottle rack",
+  "glacier",
+  "pergola",
+  "building materials",
+  "television camera",
+  "first floor",
+  "rifle",
+  "tennis table",
+  "stadium",
+  "safety belt",
+  "cover",
+  "dish rack",
+  "synthesizer",
+  "pumpkin",
+  "gutter",
+  "fruit stand",
+  "ice floe, floe",
+  "handle, grip, handgrip, hold",
+  "wheelchair",
+  "mousepad, mouse mat",
+  "diploma",
+  "fairground ride",
+  "radio",
+  "hotplate",
+  "junk",
+  "wheelbarrow",
+  "stream",
+  "toll plaza",
+  "punching bag",
+  "trough",
+  "throne",
+  "chair desk",
+  "weighbridge",
+  "extractor fan",
+  "hanging clothes",
+  "dish, dish aerial, dish antenna, saucer",
+  "alarm clock, alarm",
+  "ski lift",
+  "chain",
+  "garage",
+  "mechanical shovel",
+  "wine rack",
+  "tramway",
+  "treadmill",
+  "menu",
+  "block",
+  "well",
+  "witness stand",
+  "duck",
+  "casserole",
+  "frying pan",
+  "desk organizer",
+  "mast",
+  "spectacles, specs, eyeglasses, glasses",
+  "service elevator",
+  "dollhouse",
+  "hammock",
+  "clothes hanging",
+  "photocopier",
+  "notepad",
+  "golf cart",
+  "footpath",
+  "cross",
+  "baptismal font",
+  "boiler",
+  "skip",
+  "rotisserie",
+  "tables",
+  "water mill",
+  "helmet",
+  "cover curtain",
+  "brick",
+  "table runner",
+  "ashtray",
+  "street box",
+  "stick",
+  "hangers",
+  "cells",
+  "urinal",
+  "centerpiece",
+  "portable fridge",
+  "dvds",
+  "golf club",
+  "skirting board",
+  "water cooler",
+  "clipboard",
+  "camera, photographic camera",
+  "pigeonhole",
+  "chips",
+  "food processor",
+  "post box",
+  "lid",
+  "drum",
+  "blender",
+  "cave entrance",
+  "dental chair",
+  "obelisk",
+  "canoe",
+  "mobile",
+  "monitors",
+  "pool ball",
+  "cue rack",
+  "baggage carts",
+  "shore",
+  "paper filer",
+  "bicycle rack",
+  "coat rack",
+  "garland",
+  "sports bag",
+  "fish tank",
+  "towel dispenser",
+  "carriage",
+  "brochure",
+  "plaque",
+  "stringer",
+  "iron",
+  "flag pole",
+  "toilet brush",
+  "book stand",
+  "water faucet, water tap, tap, hydrant",
+  "ticket office",
+  "broom",
+  "dvd",
+  "ice bucket",
+  "carapace, shell, cuticle, shield",
+  "tureen",
+  "folders",
+  "chess",
+  "root",
+  "sewing machine",
+  "model",
+  "pen",
+  "violin",
+  "sweatshirt",
+  "recycling materials",
+  "mitten",
+  "chopping board, cutting board",
+  "mask",
+  "log",
+  "grill",
+  "hole",
+  "target",
+  "trash bag",
+  "chalk",
+  "sticks",
+  "balloon",
+  "score",
+  "hair spray",
+  "roll",
+  "runner",
+  "engine",
+  "inflatable glove",
+  "games",
+  "pallets",
+  "baskets",
+  "coop",
+  "dvd player",
+  "rocking horse",
+  "buckets",
+  "bread rolls",
+  "shawl",
+  "watering can",
+  "spotlights",
+  "post-it",
+  "bowls",
+  "security camera",
+  "runner cloth",
+  "lock",
+  "alarm, warning device, alarm system",
+  "side",
+  "roulette",
+  "bone",
+  "cutlery",
+  "pool balls",
+  "wheels",
+  "spice rack",
+  "plant pots",
+  "towel ring",
+  "bread box",
+  "video",
+  "funfair",
+  "breads",
+  "tripod",
+  "ironing board",
+  "skimmer",
+  "hollow",
+  "scratching post",
+  "tricycle",
+  "file box",
+  "mountain pass",
+  "tombstones",
+  "cooker",
+  "card game, cards",
+  "golf bag",
+  "towel paper",
+  "chaise lounge",
+  "sun",
+  "toilet paper holder",
+  "rake",
+  "key",
+  "umbrella stand",
+  "dartboard",
+  "transformer",
+  "fireplace utensils",
+  "sweatshirts",
+  "tallboy",
+  "stapler",
+  "sauna",
+  "test tube",
+  "palette",
+  "shopping carts",
+  "tools",
+  "push button, push, button",
+  "star",
+  "roof rack",
+  "barbed wire",
+  "spray",
+  "ear",
+  "sponge",
+  "racket",
+  "tins",
+  "eyeglasses",
+  "file",
+  "scarfs",
+  "sugar bowl",
+  "flip flop",
+  "headstones",
+  "laptop bag",
+  "leash",
+  "climbing frame",
+  "suit hanger",
+  "floor spotlight",
+  "plate rack",
+  "sewer",
+  "hard drive",
+  "sprinkler",
+  "tools box",
+  "necklace",
+  "bulbs",
+  "steel industry",
+  "club",
+  "jack",
+  "door bars",
+  "control panel, instrument panel, control board, board, panel",
+  "hairbrush",
+  "napkin holder",
+  "office",
+  "smoke detector",
+  "utensils",
+  "apron",
+  "terminal",
+  "grinder",
+  "entry phone",
+  "newspaper stand",
+  "pepper shaker",
+  "onions",
+  "central processing unit, cpu, c p u , central processor, processor, mainframe",
+  "tape",
+  "bat",
+  "coaster",
+  "calculator",
+  "potatoes",
+  "luggage rack",
+  "salt",
+  "street number",
+  "viewpoint",
+  "sword",
+  "cd",
+  "rowing machine",
+  "plug",
+  "pepper",
+  "tongs",
+  "bonfire",
+  "dog dish",
+  "belt",
+  "dumbbells",
+  "videocassette recorder, vcr",
+  "hook",
+  "envelopes",
+  "shower faucet",
+  "watch",
+  "padlock",
+  "swimming pool ladder",
+  "spanners",
+  "gravy boat",
+  "notice board",
+  "trash bags",
+  "fire alarm",
+  "ladle",
+  "stethoscope",
+  "rocket",
+  "funnel",
+  "bowling pins",
+  "valve",
+  "thermometer",
+  "cups",
+  "spice jar",
+  "night light",
+  "soaps",
+  "games table",
+  "slotted spoon",
+  "reel",
+  "scourer",
+  "sleeping robe",
+  "desk mat",
+  "dumbbell",
+  "hammer",
+  "typewriter",
+  "shaker",
+  "cheese dish",
+  "sea star",
+  "racquet",
+  "butane gas cylinder",
+  "paper weight",
+  "shaving brush",
+  "sunglasses",
+  "gear shift",
+  "towel rail",
+  "adding machine, totalizer, totaliser"
+ ],
+ "classes": [
+  {
+   "id": 0,
+   "name": "wall",
+   "seen": true,
+   "coco_match": "wall-other",
+   "rule": "exact:wall"
+  },
+  {
+   "id": 1,
+   "name": "building, edifice",
+   "seen": true,
+   "coco_match": "building-other",
+   "rule": "exact:building"
+  },
+  {
+   "id": 2,
+   "name": "sky",
+   "seen": true,
+   "coco_match": "sky-other",
+   "rule": "exact:sky"
+  },
+  {
+   "id": 3,
+   "name": "tree",
+   "seen": true,
+   "coco_match": "tree",
+   "rule": "exact:tree"
+  },
+  {
+   "id": 4,
+   "name": "road, route",
+   "seen": true,
+   "coco_match": "road",
+   "rule": "exact:road"
+  },
+  {
+   "id": 5,
+   "name": "floor, flooring",
+   "seen": true,
+   "coco_match": "floor-other",
+   "rule": "exact:floor"
+  },
+  {
+   "id": 6,
+   "name": "ceiling",
+   "seen": true,
+   "coco_match": "ceiling-other",
+   "rule": "exact:ceiling"
+  },
+  {
+   "id": 7,
+   "name": "bed",
+   "seen": true,
+   "coco_match": "bed",
+   "rule": "exact:bed"
+  },
+  {
+   "id": 8,
+   "name": "sidewalk, pavement",
+   "seen": true,
+   "coco_match": "pavement",
+   "rule": "exact:pavement"
+  },
+  {
+   "id": 9,
+   "name": "earth, ground",
+   "seen": true,
+   "coco_match": "ground-other",
+   "rule": "exact:ground"
+  },
+  {
+   "id": 10,
+   "name": "cabinet",
+   "seen": true,
+   "coco_match": "cabinet",
+   "rule": "exact:cabinet"
+  },
+  {
+   "id": 11,
+   "name": "person, individual, someone, somebody, mortal, soul",
+   "seen": true,
+   "coco_match": "person",
+   "rule": "exact:person"
+  },
+  {
+   "id": 12,
+   "name": "grass",
+   "seen": true,
+   "coco_match": "grass",
+   "rule": "exact:grass"
+  },
+  {
+   "id": 13,
+   "name": "windowpane, window",
+   "seen": true,
+   "coco_match": "window-other",
+   "rule": "exact:window"
+  },
+  {
+   "id": 14,
+   "name": "car, auto, automobile, machine, motorcar",
+   "seen": true,
+   "coco_match": "car",
+   "rule": "exact:car"
+  },
+  {
+   "id": 15,
+   "name": "mountain, mount",
+   "seen": true,
+   "coco_match": "mountain",
+   "rule": "exact:mountain"
+  },
+  {
+   "id": 16,
+   "name": "plant, flora, plant life",
+   "seen": true,
+   "coco_match": "plant-other",
+   "rule": "exact:plant"
+  },
+  {
+   "id": 17,
+   "name": "table",
+   "seen": true,
+   "coco_match": "table",
+   "rule": "exact:table"
+  },
+  {
+   "id": 18,
+   "name": "chair",
+   "seen": true,
+   "coco_match": "chair",
+   "rule": "exact:chair"
+  },
+  {
+   "id": 19,
+   "name": "curtain, drape, drapery, mantle, pall",
+   "seen": true,
+   "coco_match": "curtain",
+   "rule": "exact:curtain"
+  },
+  {
+   "id": 20,
+   "name": "door",
+   "seen": true,
+   "coco_match": "door-stuff",
+   "rule": "exact:door"
+  },
+  {
+   "id": 21,
+   "name": "sofa, couch, lounge",
+   "seen": true,
+   "coco_match": "couch",
+   "rule": "exact:couch"
+  },
+  {
+   "id": 22,
+   "name": "sea",
+   "seen": true,
+   "coco_match": "sea",
+   "rule": "exact:sea"
+  },
+  {
+   "id": 23,
+   "name": "painting, picture",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 24,
+   "name": "water",
+   "seen": true,
+   "coco_match": "water-other",
+   "rule": "exact:water"
+  },
+  {
+   "id": 25,
+   "name": "mirror",
+   "seen": true,
+   "coco_match": "mirror-stuff",
+   "rule": "exact:mirror"
+  },
+  {
+   "id": 26,
+   "name": "house",
+   "seen": true,
+   "coco_match": "house",
+   "rule": "exact:house"
+  },
+  {
+   "id": 27,
+   "name": "rug, carpet, carpeting",
+   "seen": true,
+   "coco_match": "rug",
+   "rule": "exact:rug"
+  },
+  {
+   "id": 28,
+   "name": "shelf",
+   "seen": true,
+   "coco_match": "shelf",
+   "rule": "exact:shelf"
+  },
+  {
+   "id": 29,
+   "name": "armchair",
+   "seen": true,
+   "coco_match": "chair",
+   "rule": "synonym:armchair"
+  },
+  {
+   "id": 30,
+   "name": "fence, fencing",
+   "seen": true,
+   "coco_match": "fence",
+   "rule": "exact:fence"
+  },
+  {
+   "id": 31,
+   "name": "field",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 32,
+   "name": "lamp",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 33,
+   "name": "rock, stone",
+   "seen": true,
+   "coco_match": "rock",
+   "rule": "exact:rock"
+  },
+  {
+   "id": 34,
+   "name": "seat",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 35,
+   "name": "river",
+   "seen": true,
+   "coco_match": "river",
+   "rule": "exact:river"
+  },
+  {
+   "id": 36,
+   "name": "desk",
+   "seen": true,
+   "coco_match": "desk-stuff",
+   "rule": "exact:desk"
+  },
+  {
+   "id": 37,
+   "name": "bathtub, bathing tub, bath, tub",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 38,
+   "name": "railing, rail",
+   "seen": true,
+   "coco_match": "railing",
+   "rule": "exact:railing"
+  },
+  {
+   "id": 39,
+   "name": "signboard, sign",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 40,
+   "name": "cushion",
+   "seen": true,
+   "coco_match": "pillow",
+   "rule": "synonym:cushion"
+  },
+  {
+   "id": 41,
+   "name": "path",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 42,
+   "name": "work surface",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 43,
+   "name": "stairs, steps",
+   "seen": true,
+   "coco_match": "stairs",
+   "rule": "exact:stairs"
+  },
+  {
+   "id": 44,
+   "name": "column, pillar",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 45,
+   "name": "sink",
+   "seen": true,
+   "coco_match": "sink",
+   "rule": "exact:sink"
+  },
+  {
+   "id": 46,
+   "name": "wardrobe, closet, press",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 47,
+   "name": "snow",
+   "seen": true,
+   "coco_match": "snow",
+   "rule": "exact:snow"
+  },
+  {
+   "id": 48,
+   "name": "refrigerator, icebox",
+   "seen": true,
+   "coco_match": "refrigerator",
+   "rule": "exact:refrigerator"
+  },
+  {
+   "id": 49,
+   "name": "base, pedestal, stand",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 50,
+   "name": "bridge, span",
+   "seen": true,
+   "coco_match": "bridge",
+   "rule": "exact:bridge"
+  },
+  {
+   "id": 51,
+   "name": "blind, screen",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 52,
+   "name": "runway",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 53,
+   "name": "cliff, drop, drop-off",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 54,
+   "name": "sand",
+   "seen": true,
+   "coco_match": "sand",
+   "rule": "exact:sand"
+  },
+  {
+   "id": 55,
+   "name": "fireplace, hearth, open fireplace",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 56,
+   "name": "pillow",
+   "seen": true,
+   "coco_match": "pillow",
+   "rule": "exact:pillow"
+  },
+  {
+   "id": 57,
+   "name": "screen door, screen",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 58,
+   "name": "toilet, can, commode, crapper, pot, potty, stool, throne",
+   "seen": true,
+   "coco_match": "toilet",
+   "rule": "exact:toilet"
+  },
+  {
+   "id": 59,
+   "name": "skyscraper",
+   "seen": true,
+   "coco_match": "skyscraper",
+   "rule": "exact:skyscraper"
+  },
+  {
+   "id": 60,
+   "name": "grandstand, covered stand",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 61,
+   "name": "box",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 62,
+   "name": "pool table, billiard table, snooker table",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 63,
+   "name": "palm, palm tree",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 64,
+   "name": "double door",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 65,
+   "name": "coffee table, cocktail table",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 66,
+   "name": "counter",
+   "seen": true,
+   "coco_match": "counter",
+   "rule": "exact:counter"
+  },
+  {
+   "id": 67,
+   "name": "countertop",
+   "seen": true,
+   "coco_match": "counter",
+   "rule": "synonym:countertop"
+  },
+  {
+   "id": 68,
+   "name": "chest of drawers, chest, bureau, dresser",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 69,
+   "name": "kitchen island",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 70,
+   "name": "boat",
+   "seen": true,
+   "coco_match": "boat",
+   "rule": "exact:boat"
+  },
+  {
+   "id": 71,
+   "name": "waterfall, falls",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 72,
+   "name": "stove, kitchen stove, range, kitchen range, cooking stove",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 73,
+   "name": "flower",
+   "seen": true,
+   "coco_match": "flower",
+   "rule": "exact:flower"
+  },
+  {
+   "id": 74,
+   "name": "bookcase",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 75,
+   "name": "controls",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 76,
+   "name": "book",
+   "seen": true,
+   "coco_match": "book",
+   "rule": "exact:book"
+  },
+  {
+   "id": 77,
+   "name": "stairway, staircase",
+   "seen": true,
+   "coco_match": "stairs",
+   "rule": "synonym:stairway"
+  },
+  {
+   "id": 78,
+   "name": "streetlight, street lamp",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 79,
+   "name": "computer, computing machine, computing device, data processor, electronic computer, information processing system",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 80,
+   "name": "bus, autobus, coach, charabanc, double-decker, jitney, motorbus, motorcoach, omnibus, passenger vehicle",
+   "seen": true,
+   "coco_match": "bus",
+   "rule": "exact:bus"
+  },
+  {
+   "id": 81,
+   "name": "swivel chair",
+   "seen": true,
+   "coco_match": "chair",
+   "rule": "synonym:swivel chair"
+  },
+  {
+   "id": 82,
+   "name": "light, light source",
+   "seen": true,
+   "coco_match": "light",
+   "rule": "exact:light"
+  },
+  {
+   "id": 83,
+   "name": "bench",
+   "seen": true,
+   "coco_match": "bench",
+   "rule": "exact:bench"
+  },
+  {
+   "id": 84,
+   "name": "case, display case, showcase, vitrine",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 85,
+   "name": "towel",
+   "seen": true,
+   "coco_match": "towel",
+   "rule": "exact:towel"
+  },
+  {
+   "id": 86,
+   "name": "fountain",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 87,
+   "name": "embankment",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 88,
+   "name": "television receiver, television, television set, tv, tv set, idiot box, boob tube, telly, goggle box",
+   "seen": true,
+   "coco_match": "tv",
+   "rule": "exact:television"
+  },
+  {
+   "id": 89,
+   "name": "van",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 90,
+   "name": "hill",
+   "seen": true,
+   "coco_match": "hill",
+   "rule": "exact:hill"
+  },
+  {
+   "id": 91,
+   "name": "awning, sunshade, sunblind",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 92,
+   "name": "poster, posting, placard, notice, bill, card",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 93,
+   "name": "truck, motortruck",
+   "seen": true,
+   "coco_match": "truck",
+   "rule": "exact:truck"
+  },
+  {
+   "id": 94,
+   "name": "airplane, aeroplane, plane",
+   "seen": true,
+   "coco_match": "airplane",
+   "rule": "exact:airplane"
+  },
+  {
+   "id": 95,
+   "name": "pole",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 96,
+   "name": "tower",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 97,
+   "name": "court",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 98,
+   "name": "ball",
+   "seen": true,
+   "coco_match": "sports ball",
+   "rule": "synonym:ball"
+  },
+  {
+   "id": 99,
+   "name": "aircraft carrier, carrier, flattop, attack aircraft carrier",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 100,
+   "name": "buffet, counter, sideboard",
+   "seen": true,
+   "coco_match": "counter",
+   "rule": "exact:counter"
+  },
+  {
+   "id": 101,
+   "name": "hovel, hut, hutch, shack, shanty",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 102,
+   "name": "apparel, wearing apparel, dress, clothes",
+   "seen": true,
+   "coco_match": "clothes",
+   "rule": "exact:clothes"
+  },
+  {
+   "id": 103,
+   "name": "minibike, motorbike",
+   "seen": true,
+   "coco_match": "motorcycle",
+   "rule": "synonym:minibike"
+  },
+  {
+   "id": 104,
+   "name": "animal, animate being, beast, brute, creature, fauna",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 105,
+   "name": "chandelier, pendant, pendent",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 106,
+   "name": "step, stair",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 107,
+   "name": "booth, cubicle, stall, kiosk",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 108,
+   "name": "bicycle, bike, wheel, cycle",
+   "seen": true,
+   "coco_match": "bicycle",
+   "rule": "exact:bicycle"
+  },
+  {
+   "id": 109,
+   "name": "doorframe, doorcase",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 110,
+   "name": "sconce",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 111,
+   "name": "pond",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 112,
+   "name": "trade name, brand name, brand, marque",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 113,
+   "name": "bannister, banister, balustrade, balusters, handrail",
+   "seen": true,
+   "coco_match": "railing",
+   "rule": "synonym:bannister"
+  },
+  {
+   "id": 114,
+   "name": "bag",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 115,
+   "name": "traffic light, traffic signal, stoplight",
+   "seen": true,
+   "coco_match": "traffic light",
+   "rule": "exact:traffic light"
+  },
+  {
+   "id": 116,
+   "name": "gazebo",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 117,
+   "name": "escalator, moving staircase, moving stairway",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 118,
+   "name": "land, ground, soil",
+   "seen": true,
+   "coco_match": "ground-other",
+   "rule": "exact:ground"
+  },
+  {
+   "id": 119,
+   "name": "board, plank",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 120,
+   "name": "arcade machine",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 121,
+   "name": "eiderdown, duvet, continental quilt",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 122,
+   "name": "bar",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 123,
+   "name": "stall, stand, sales booth",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 124,
+   "name": "playground",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 125,
+   "name": "ship",
+   "seen": true,
+   "coco_match": "boat",
+   "rule": "synonym:ship"
+  },
+  {
+   "id": 126,
+   "name": "ottoman, pouf, pouffe, puff, hassock",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 127,
+   "name": "ashcan, trash can, garbage can, wastebin, ash bin, ash-bin, ashbin, dustbin, trash barrel, trash bin",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 128,
+   "name": "bottle",
+   "seen": true,
+   "coco_match": "bottle",
+   "rule": "exact:bottle"
+  },
+  {
+   "id": 129,
+   "name": "cradle",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 130,
+   "name": "pot, flowerpot",
+   "seen": true,
+   "coco_match": "potted plant",
+   "rule": "synonym:flowerpot"
+  },
+  {
+   "id": 131,
+   "name": "conveyer belt, conveyor belt, conveyer, conveyor, transporter",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 132,
+   "name": "train, railroad train",
+   "seen": true,
+   "coco_match": "train",
+   "rule": "exact:train"
+  },
+  {
+   "id": 133,
+   "name": "stool",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 134,
+   "name": "lake",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 135,
+   "name": "tank, storage tank",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 136,
+   "name": "ice, water ice",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 137,
+   "name": "basket, handbasket",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 138,
+   "name": "manhole",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 139,
+   "name": "tent, collapsible shelter",
+   "seen": true,
+   "coco_match": "tent",
+   "rule": "exact:tent"
+  },
+  {
+   "id": 140,
+   "name": "canopy",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 141,
+   "name": "microwave, microwave oven",
+   "seen": true,
+   "coco_match": "microwave",
+   "rule": "exact:microwave"
+  },
+  {
+   "id": 142,
+   "name": "barrel, cask",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 143,
+   "name": "dirt track",
+   "seen": true,
+   "coco_match": "dirt",
+   "rule": "synonym:dirt track"
+  },
+  {
+   "id": 144,
+   "name": "beam",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 145,
+   "name": "dishwasher, dish washer, dishwashing machine",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 146,
+   "name": "plate",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 147,
+   "name": "screen, crt screen",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 148,
+   "name": "ruins",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 149,
+   "name": "washer, automatic washer, washing machine",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 150,
+   "name": "blanket, cover",
+   "seen": true,
+   "coco_match": "blanket",
+   "rule": "exact:blanket"
+  },
+  {
+   "id": 151,
+   "name": "plaything, toy",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 152,
+   "name": "food, solid food",
+   "seen": true,
+   "coco_match": "food-other",
+   "rule": "exact:food"
+  },
+  {
+   "id": 153,
+   "name": "screen, silver screen, projection screen",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 154,
+   "name": "oven",
+   "seen": true,
+   "coco_match": "oven",
+   "rule": "exact:oven"
+  },
+  {
+   "id": 155,
+   "name": "stage",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 156,
+   "name": "beacon, lighthouse, beacon light, pharos",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 157,
+   "name": "umbrella",
+   "seen": true,
+   "coco_match": "umbrella",
+   "rule": "exact:umbrella"
+  },
+  {
+   "id": 158,
+   "name": "sculpture",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 159,
+   "name": "aqueduct",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 160,
+   "name": "container",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 161,
+   "name": "scaffolding, staging",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 162,
+   "name": "hood, exhaust hood",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 163,
+   "name": "curb, curbing, kerb",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 164,
+   "name": "roller coaster",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 165,
+   "name": "horse, equus caballus",
+   "seen": true,
+   "coco_match": "horse",
+   "rule": "exact:horse"
+  },
+  {
+   "id": 166,
+   "name": "catwalk",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 167,
+   "name": "glass, drinking glass",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 168,
+   "name": "vase",
+   "seen": true,
+   "coco_match": "vase",
+   "rule": "exact:vase"
+  },
+  {
+   "id": 169,
+   "name": "central reservation",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 170,
+   "name": "carousel",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 171,
+   "name": "radiator",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 172,
+   "name": "closet",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 173,
+   "name": "machine",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 174,
+   "name": "pier, wharf, wharfage, dock",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 175,
+   "name": "fan",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 176,
+   "name": "inflatable bounce game",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 177,
+   "name": "pitch",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 178,
+   "name": "paper",
+   "seen": true,
+   "coco_match": "paper",
+   "rule": "exact:paper"
+  },
+  {
+   "id": 179,
+   "name": "arcade, colonnade",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 180,
+   "name": "hot tub",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 181,
+   "name": "helicopter",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 182,
+   "name": "tray",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 183,
+   "name": "partition, divider",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 184,
+   "name": "vineyard",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 185,
+   "name": "bowl",
+   "seen": true,
+   "coco_match": "bowl",
+   "rule": "exact:bowl"
+  },
+  {
+   "id": 186,
+   "name": "bullring",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 187,
+   "name": "flag",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 188,
+   "name": "pot",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 189,
+   "name": "footbridge, overcrossing, pedestrian bridge",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 190,
+   "name": "shower",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 191,
+   "name": "bag, traveling bag, travelling bag, grip, suitcase",
+   "seen": true,
+   "coco_match": "suitcase",
+   "rule": "exact:suitcase"
+  },
+  {
+   "id": 192,
+   "name": "bulletin board, notice board",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 193,
+   "name": "confessional booth",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 194,
+   "name": "trunk, tree trunk, bole",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 195,
+   "name": "forest",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 196,
+   "name": "elevator door",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 197,
+   "name": "laptop, laptop computer",
+   "seen": true,
+   "coco_match": "laptop",
+   "rule": "exact:laptop"
+  },
+  {
+   "id": 198,
+   "name": "instrument panel",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 199,
+   "name": "bucket, pail",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 200,
+   "name": "tapestry, tapis",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 201,
+   "name": "platform",
+   "seen": true,
+   "coco_match": "platform",
+   "rule": "exact:platform"
+  },
+  {
+   "id": 202,
+   "name": "jacket",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 203,
+   "name": "gate",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 204,
+   "name": "monitor, monitoring device",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 205,
+   "name": "telephone booth, phone booth, call box, telephone box, telephone kiosk",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 206,
+   "name": "spotlight, spot",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 207,
+   "name": "ring",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 208,
+   "name": "control panel",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 209,
+   "name": "blackboard, chalkboard",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 210,
+   "name": "air conditioner, air conditioning",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 211,
+   "name": "chest",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 212,
+   "name": "clock",
+   "seen": true,
+   "coco_match": "clock",
+   "rule": "exact:clock"
+  },
+  {
+   "id": 213,
+   "name": "sand dune",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 214,
+   "name": "pipe, pipage, piping",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 215,
+   "name": "vault",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 216,
+   "name": "table football",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 217,
+   "name": "cannon",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 218,
+   "name": "swimming pool, swimming bath, natatorium",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 219,
+   "name": "fluorescent, fluorescent fixture",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 220,
+   "name": "statue",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 221,
+   "name": "loudspeaker, speaker, speaker unit, loudspeaker system, speaker system",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 222,
+   "name": "exhibitor",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 223,
+   "name": "ladder",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 224,
+   "name": "carport",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 225,
+   "name": "dam",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 226,
+   "name": "pulpit",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 227,
+   "name": "skylight, fanlight",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 228,
+   "name": "water tower",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 229,
+   "name": "grill, grille, grillwork",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 230,
+   "name": "display board",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 231,
+   "name": "pane, pane of glass, window glass",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 232,
+   "name": "rubbish, trash, scrap",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 233,
+   "name": "ice rink",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 234,
+   "name": "fruit",
+   "seen": true,
+   "coco_match": "fruit",
+   "rule": "exact:fruit"
+  },
+  {
+   "id": 235,
+   "name": "patio",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 236,
+   "name": "vending machine",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 237,
+   "name": "telephone, phone, telephone set",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 238,
+   "name": "net",
+   "seen": true,
+   "coco_match": "net",
+   "rule": "exact:net"
+  },
+  {
+   "id": 239,
+   "name": "backpack, back pack, knapsack, packsack, rucksack, haversack",
+   "seen": true,
+   "coco_match": "backpack",
+   "rule": "exact:backpack"
+  },
+  {
+   "id": 240,
+   "name": "jar",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 241,
+   "name": "track",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 242,
+   "name": "magazine",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 243,
+   "name": "shutter",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 244,
+   "name": "roof",
+   "seen": true,
+   "coco_match": "roof",
+   "rule": "exact:roof"
+  },
+  {
+   "id": 245,
+   "name": "banner, streamer",
+   "seen": true,
+   "coco_match": "banner",
+   "rule": "exact:banner"
+  },
+  {
+   "id": 246,
+   "name": "landfill",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 247,
+   "name": "post",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 248,
+   "name": "altarpiece, reredos",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 249,
+   "name": "hat, chapeau, lid",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 250,
+   "name": "arch, archway",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 251,
+   "name": "table game",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 252,
+   "name": "bag, handbag, pocketbook, purse",
+   "seen": true,
+   "coco_match": "handbag",
+   "rule": "exact:handbag"
+  },
+  {
+   "id": 253,
+   "name": "document, written document, papers",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 254,
+   "name": "dome",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 255,
+   "name": "pier",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 256,
+   "name": "shanties",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 257,
+   "name": "forecourt",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 258,
+   "name": "crane",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 259,
+   "name": "dog, domestic dog, canis familiaris",
+   "seen": true,
+   "coco_match": "dog",
+   "rule": "exact:dog"
+  },
+  {
+   "id": 260,
+   "name": "piano, pianoforte, forte-piano",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 261,
+   "name": "drawing",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 262,
+   "name": "cabin",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 263,
+   "name": "ad, advertisement, advertizement, advertising, advertizing, advert",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 264,
+   "name": "amphitheater, amphitheatre, coliseum",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 265,
+   "name": "monument",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 266,
+   "name": "henhouse",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 267,
+   "name": "cockpit",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 268,
+   "name": "heater, warmer",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 269,
+   "name": "windmill, aerogenerator, wind generator",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 270,
+   "name": "pool",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 271,
+   "name": "elevator, lift",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 272,
+   "name": "decoration, ornament, ornamentation",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 273,
+   "name": "labyrinth",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 274,
+   "name": "text, textual matter",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 275,
+   "name": "printer",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 276,
+   "name": "mezzanine, first balcony",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 277,
+   "name": "mattress",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 278,
+   "name": "straw",
+   "seen": true,
+   "coco_match": "straw",
+   "rule": "exact:straw"
+  },
+  {
+   "id": 279,
+   "name": "stalls",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 280,
+   "name": "patio, terrace",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 281,
+   "name": "billboard, hoarding",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 282,
+   "name": "bus stop",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 283,
+   "name": "trouser, pant",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 284,
+   "name": "console table, console",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 285,
+   "name": "rack",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 286,
+   "name": "notebook",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 287,
+   "name": "shrine",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 288,
+   "name": "pantry",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 289,
+   "name": "cart",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 290,
+   "name": "steam shovel",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 291,
+   "name": "porch",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 292,
+   "name": "postbox, mailbox, letter box",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 293,
+   "name": "figurine, statuette",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 294,
+   "name": "recycling bin",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 295,
+   "name": "folding screen",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 296,
+   "name": "telescope",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 297,
+   "name": "deck chair, beach chair",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 298,
+   "name": "kennel",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 299,
+   "name": "coffee maker",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 300,
+   "name": "altar, communion table, lord's table",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 301,
+   "name": "fish",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 302,
+   "name": "easel",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 303,
+   "name": "artificial golf green",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 304,
+   "name": "iceberg",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 305,
+   "name": "candlestick, candle holder",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 306,
+   "name": "shower stall, shower bath",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 307,
+   "name": "television stand",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 308,
+   "name": "wall socket, wall plug, electric outlet, electrical outlet, outlet, electric receptacle",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 309,
+   "name": "skeleton",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 310,
+   "name": "grand piano, grand",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 311,
+   "name": "candy, confect",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 312,
+   "name": "grille door",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 313,
+   "name": "pedestal, plinth, footstall",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 314,
+   "name": "jersey, t-shirt, tee shirt",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 315,
+   "name": "shoe",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 316,
+   "name": "gravestone, headstone, tombstone",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 317,
+   "name": "shanty",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 318,
+   "name": "structure",
+   "seen": true,
+   "coco_match": "structural-other",
+   "rule": "exact:structure"
+  },
+  {
+   "id": 319,
+   "name": "rocking chair, rocker",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 320,
+   "name": "bird",
+   "seen": true,
+   "coco_match": "bird",
+   "rule": "exact:bird"
+  },
+  {
+   "id": 321,
+   "name": "place mat",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 322,
+   "name": "tomb",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 323,
+   "name": "big top",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 324,
+   "name": "gas pump, gasoline pump, petrol pump, island dispenser",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 325,
+   "name": "lockers",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 326,
+   "name": "cage",
+   "seen": true,
+   "coco_match": "cage",
+   "rule": "exact:cage"
+  },
+  {
+   "id": 327,
+   "name": "finger",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 328,
+   "name": "bleachers",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 329,
+   "name": "ferris wheel",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 330,
+   "name": "hairdresser chair",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 331,
+   "name": "mat",
+   "seen": true,
+   "coco_match": "mat",
+   "rule": "exact:mat"
+  },
+  {
+   "id": 332,
+   "name": "stands",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 333,
+   "name": "aquarium, fish tank, marine museum",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 334,
+   "name": "streetcar, tram, tramcar, trolley, trolley car",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 335,
+   "name": "napkin, table napkin, serviette",
+   "seen": true,
+   "coco_match": "napkin",
+   "rule": "exact:napkin"
+  },
+  {
+   "id": 336,
+   "name": "dummy",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 337,
+   "name": "booklet, brochure, folder, leaflet, pamphlet",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 338,
+   "name": "sand trap",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 339,
+   "name": "shop, store",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 340,
+   "name": "table cloth",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 341,
+   "name": "service station",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 342,
+   "name": "coffin",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 343,
+   "name": "drawer",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 344,
+   "name": "cages",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 345,
+   "name": "slot machine, coin machine",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 346,
+   "name": "balcony",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 347,
+   "name": "volleyball court",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 348,
+   "name": "table tennis",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 349,
+   "name": "control table",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 350,
+   "name": "shirt",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 351,
+   "name": "merchandise, ware, product",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 352,
+   "name": "railway",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 353,
+   "name": "parterre",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 354,
+   "name": "chimney",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 355,
+   "name": "can, tin, tin can",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 356,
+   "name": "tanks",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 357,
+   "name": "fabric, cloth, material, textile",
+   "seen": true,
+   "coco_match": "cloth",
+   "rule": "exact:cloth"
+  },
+  {
+   "id": 358,
+   "name": "alga, algae",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 359,
+   "name": "system",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 360,
+   "name": "map",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 361,
+   "name": "greenhouse",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 362,
+   "name": "mug",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 363,
+   "name": "barbecue",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 364,
+   "name": "trailer",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 365,
+   "name": "toilet tissue, toilet paper, bathroom tissue",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 366,
+   "name": "organ",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 367,
+   "name": "dishrag, dishcloth",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 368,
+   "name": "island",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 369,
+   "name": "keyboard",
+   "seen": true,
+   "coco_match": "keyboard",
+   "rule": "exact:keyboard"
+  },
+  {
+   "id": 370,
+   "name": "trench",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 371,
+   "name": "basket, basketball hoop, hoop",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 372,
+   "name": "steering wheel, wheel",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 373,
+   "name": "pitcher, ewer",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 374,
+   "name": "goal",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 375,
+   "name": "bread, breadstuff, staff of life",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 376,
+   "name": "beds",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 377,
+   "name": "wood",
+   "seen": true,
+   "coco_match": "wood",
+   "rule": "exact:wood"
+  },
+  {
+   "id": 378,
+   "name": "file cabinet",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 379,
+   "name": "newspaper, paper",
+   "seen": true,
+   "coco_match": "paper",
+   "rule": "exact:paper"
+  },
+  {
+   "id": 380,
+   "name": "motorboat",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 381,
+   "name": "rope",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 382,
+   "name": "guitar",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 383,
+   "name": "rubble",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 384,
+   "name": "scarf",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 385,
+   "name": "barrels",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 386,
+   "name": "cap",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 387,
+   "name": "leaves",
+   "seen": true,
+   "coco_match": "leaves",
+   "rule": "exact:leaves"
+  },
+  {
+   "id": 388,
+   "name": "control tower",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 389,
+   "name": "dashboard",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 390,
+   "name": "bandstand",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 391,
+   "name": "lectern",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 392,
+   "name": "switch, electric switch, electrical switch",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 393,
+   "name": "baseboard, mopboard, skirting board",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 394,
+   "name": "shower room",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 395,
+   "name": "smoke",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 396,
+   "name": "faucet, spigot",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 397,
+   "name": "bulldozer",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 398,
+   "name": "saucepan",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 399,
+   "name": "shops",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 400,
+   "name": "meter",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 401,
+   "name": "crevasse",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 402,
+   "name": "gear",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 403,
+   "name": "candelabrum, candelabra",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 404,
+   "name": "sofa bed",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 405,
+   "name": "tunnel",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 406,
+   "name": "pallet",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 407,
+   "name": "wire, conducting wire",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 408,
+   "name": "kettle, boiler",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 409,
+   "name": "bidet",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 410,
+   "name": "baby buggy, baby carriage, carriage, perambulator, pram, stroller, go-cart, pushchair, pusher",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 411,
+   "name": "music stand",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 412,
+   "name": "pipe, tube",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 413,
+   "name": "cup",
+   "seen": true,
+   "coco_match": "cup",
+   "rule": "exact:cup"
+  },
+  {
+   "id": 414,
+   "name": "parking meter",
+   "seen": true,
+   "coco_match": "parking meter",
+   "rule": "exact:parking meter"
+  },
+  {
+   "id": 415,
+   "name": "ice hockey rink",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 416,
+   "name": "shelter",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 417,
+   "name": "weeds",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 418,
+   "name": "temple",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 419,
+   "name": "patty, cake",
+   "seen": true,
+   "coco_match": "cake",
+   "rule": "exact:cake"
+  },
+  {
+   "id": 420,
+   "name": "ski slope",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 421,
+   "name": "panel",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 422,
+   "name": "wallet",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 423,
+   "name": "wheel",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 424,
+   "name": "towel rack, towel horse",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 425,
+   "name": "roundabout",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 426,
+   "name": "canister, cannister, tin",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 427,
+   "name": "rod",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 428,
+   "name": "soap dispenser",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 429,
+   "name": "bell",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 430,
+   "name": "canvas",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 431,
+   "name": "box office, ticket office, ticket booth",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 432,
+   "name": "teacup",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 433,
+   "name": "trellis",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 434,
+   "name": "workbench",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 435,
+   "name": "valley, vale",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 436,
+   "name": "toaster",
+   "seen": true,
+   "coco_match": "toaster",
+   "rule": "exact:toaster"
+  },
+  {
+   "id": 437,
+   "name": "knife",
+   "seen": true,
+   "coco_match": "knife",
+   "rule": "exact:knife"
+  },
+  {
+   "id": 438,
+   "name": "podium",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 439,
+   "name": "ramp",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 440,
+   "name": "tumble dryer",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 441,
+   "name": "fireplug, fire hydrant, plug",
+   "seen": true,
+   "coco_match": "fire hydrant",
+   "rule": "exact:fire hydrant"
+  },
+  {
+   "id": 442,
+   "name": "gym shoe, sneaker, tennis shoe",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 443,
+   "name": "lab bench",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 444,
+   "name": "equipment",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 445,
+   "name": "rocky formation",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 446,
+   "name": "plastic",
+   "seen": true,
+   "coco_match": "plastic",
+   "rule": "exact:plastic"
+  },
+  {
+   "id": 447,
+   "name": "calendar",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 448,
+   "name": "caravan",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 449,
+   "name": "check-in-desk",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 450,
+   "name": "ticket counter",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 451,
+   "name": "brush",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 452,
+   "name": "mill",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 453,
+   "name": "covered bridge",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 454,
+   "name": "bowling alley",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 455,
+   "name": "hanger",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 456,
+   "name": "excavator",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 457,
+   "name": "trestle",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 458,
+   "name": "revolving door",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 459,
+   "name": "blast furnace",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 460,
+   "name": "scale, weighing machine",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 461,
+   "name": "projector",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 462,
+   "name": "soap",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 463,
+   "name": "locker",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 464,
+   "name": "tractor",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 465,
+   "name": "stretcher",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 466,
+   "name": "frame",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 467,
+   "name": "grating",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 468,
+   "name": "alembic",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 469,
+   "name": "candle, taper, wax light",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 470,
+   "name": "barrier",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 471,
+   "name": "cardboard",
+   "seen": true,
+   "coco_match": "cardboard",
+   "rule": "exact:cardboard"
+  },
+  {
+   "id": 472,
+   "name": "cave",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 473,
+   "name": "puddle",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 474,
+   "name": "tarp",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 475,
+   "name": "price tag",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 476,
+   "name": "watchtower",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 477,
+   "name": "meters",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 478,
+   "name": "light bulb, lightbulb, bulb, incandescent lamp, electric light, electric-light bulb",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 479,
+   "name": "tracks",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 480,
+   "name": "hair dryer",
+   "seen": true,
+   "coco_match": "hair drier",
+   "rule": "exact:hair dryer"
+  },
+  {
+   "id": 481,
+   "name": "skirt",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 482,
+   "name": "viaduct",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 483,
+   "name": "paper towel",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 484,
+   "name": "coat",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 485,
+   "name": "sheet",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 486,
+   "name": "fire extinguisher, extinguisher, asphyxiator",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 487,
+   "name": "water wheel",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 488,
+   "name": "pottery, clayware",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 489,
+   "name": "magazine rack",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 490,
+   "name": "teapot",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 491,
+   "name": "microphone, mike",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 492,
+   "name": "support",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 493,
+   "name": "forklift",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 494,
+   "name": "canyon",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 495,
+   "name": "cash register, register",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 496,
+   "name": "leaf, leafage, foliage",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 497,
+   "name": "remote control, remote",
+   "seen": true,
+   "coco_match": "remote",
+   "rule": "exact:remote"
+  },
+  {
+   "id": 498,
+   "name": "soap dish",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 499,
+   "name": "windshield, windscreen",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 500,
+   "name": "cat",
+   "seen": true,
+   "coco_match": "cat",
+   "rule": "exact:cat"
+  },
+  {
+   "id": 501,
+   "name": "cue, cue stick, pool cue, pool stick",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 502,
+   "name": "vent, venthole, vent-hole, blowhole",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 503,
+   "name": "videos",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 504,
+   "name": "shovel",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 505,
+   "name": "eaves",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 506,
+   "name": "antenna, aerial, transmitting aerial",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 507,
+   "name": "shipyard",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 508,
+   "name": "hen, biddy",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 509,
+   "name": "traffic cone",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 510,
+   "name": "washing machines",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 511,
+   "name": "truck crane",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 512,
+   "name": "cds",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 513,
+   "name": "niche",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 514,
+   "name": "scoreboard",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 515,
+   "name": "briefcase",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 516,
+   "name": "boot",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 517,
+   "name": "sweater, jumper",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 518,
+   "name": "hay",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 519,
+   "name": "pack",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 520,
+   "name": "bottle rack",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 521,
+   "name": "glacier",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 522,
+   "name": "pergola",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 523,
+   "name": "building materials",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 524,
+   "name": "television camera",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 525,
+   "name": "first floor",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 526,
+   "name": "rifle",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 527,
+   "name": "tennis table",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 528,
+   "name": "stadium",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 529,
+   "name": "safety belt",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 530,
+   "name": "cover",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 531,
+   "name": "dish rack",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 532,
+   "name": "synthesizer",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 533,
+   "name": "pumpkin",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 534,
+   "name": "gutter",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 535,
+   "name": "fruit stand",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 536,
+   "name": "ice floe, floe",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 537,
+   "name": "handle, grip, handgrip, hold",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 538,
+   "name": "wheelchair",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 539,
+   "name": "mousepad, mouse mat",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 540,
+   "name": "diploma",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 541,
+   "name": "fairground ride",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 542,
+   "name": "radio",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 543,
+   "name": "hotplate",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 544,
+   "name": "junk",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 545,
+   "name": "wheelbarrow",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 546,
+   "name": "stream",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 547,
+   "name": "toll plaza",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 548,
+   "name": "punching bag",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 549,
+   "name": "trough",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 550,
+   "name": "throne",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 551,
+   "name": "chair desk",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 552,
+   "name": "weighbridge",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 553,
+   "name": "extractor fan",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 554,
+   "name": "hanging clothes",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 555,
+   "name": "dish, dish aerial, dish antenna, saucer",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 556,
+   "name": "alarm clock, alarm",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 557,
+   "name": "ski lift",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 558,
+   "name": "chain",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 559,
+   "name": "garage",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 560,
+   "name": "mechanical shovel",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 561,
+   "name": "wine rack",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 562,
+   "name": "tramway",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 563,
+   "name": "treadmill",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 564,
+   "name": "menu",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 565,
+   "name": "block",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 566,
+   "name": "well",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 567,
+   "name": "witness stand",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 568,
+   "name": "branch",
+   "seen": true,
+   "coco_match": "branch",
+   "rule": "exact:branch"
+  },
+  {
+   "id": 569,
+   "name": "duck",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 570,
+   "name": "casserole",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 571,
+   "name": "frying pan",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 572,
+   "name": "desk organizer",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 573,
+   "name": "mast",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 574,
+   "name": "spectacles, specs, eyeglasses, glasses",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 575,
+   "name": "service elevator",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 576,
+   "name": "dollhouse",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 577,
+   "name": "hammock",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 578,
+   "name": "clothes hanging",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 579,
+   "name": "photocopier",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 580,
+   "name": "notepad",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 581,
+   "name": "golf cart",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 582,
+   "name": "footpath",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 583,
+   "name": "cross",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 584,
+   "name": "baptismal font",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 585,
+   "name": "boiler",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 586,
+   "name": "skip",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 587,
+   "name": "rotisserie",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 588,
+   "name": "tables",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 589,
+   "name": "water mill",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 590,
+   "name": "helmet",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 591,
+   "name": "cover curtain",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 592,
+   "name": "brick",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 593,
+   "name": "table runner",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 594,
+   "name": "ashtray",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 595,
+   "name": "street box",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 596,
+   "name": "stick",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 597,
+   "name": "hangers",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 598,
+   "name": "cells",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 599,
+   "name": "urinal",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 600,
+   "name": "centerpiece",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 601,
+   "name": "portable fridge",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 602,
+   "name": "dvds",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 603,
+   "name": "golf club",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 604,
+   "name": "skirting board",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 605,
+   "name": "water cooler",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 606,
+   "name": "clipboard",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 607,
+   "name": "camera, photographic camera",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 608,
+   "name": "pigeonhole",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 609,
+   "name": "chips",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 610,
+   "name": "food processor",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 611,
+   "name": "post box",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 612,
+   "name": "lid",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 613,
+   "name": "drum",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 614,
+   "name": "blender",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 615,
+   "name": "cave entrance",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 616,
+   "name": "dental chair",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 617,
+   "name": "obelisk",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 618,
+   "name": "canoe",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 619,
+   "name": "mobile",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 620,
+   "name": "monitors",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 621,
+   "name": "pool ball",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 622,
+   "name": "cue rack",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 623,
+   "name": "baggage carts",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 624,
+   "name": "shore",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 625,
+   "name": "fork",
+   "seen": true,
+   "coco_match": "fork",
+   "rule": "exact:fork"
+  },
+  {
+   "id": 626,
+   "name": "paper filer",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 627,
+   "name": "bicycle rack",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 628,
+   "name": "coat rack",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 629,
+   "name": "garland",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 630,
+   "name": "sports bag",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 631,
+   "name": "fish tank",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 632,
+   "name": "towel dispenser",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 633,
+   "name": "carriage",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 634,
+   "name": "brochure",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 635,
+   "name": "plaque",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 636,
+   "name": "stringer",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 637,
+   "name": "iron",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 638,
+   "name": "spoon",
+   "seen": true,
+   "coco_match": "spoon",
+   "rule": "exact:spoon"
+  },
+  {
+   "id": 639,
+   "name": "flag pole",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 640,
+   "name": "toilet brush",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 641,
+   "name": "book stand",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 642,
+   "name": "water faucet, water tap, tap, hydrant",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 643,
+   "name": "ticket office",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 644,
+   "name": "broom",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 645,
+   "name": "dvd",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 646,
+   "name": "ice bucket",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 647,
+   "name": "carapace, shell, cuticle, shield",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 648,
+   "name": "tureen",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 649,
+   "name": "folders",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 650,
+   "name": "chess",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 651,
+   "name": "root",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 652,
+   "name": "sewing machine",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 653,
+   "name": "model",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 654,
+   "name": "pen",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 655,
+   "name": "violin",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 656,
+   "name": "sweatshirt",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 657,
+   "name": "recycling materials",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 658,
+   "name": "mitten",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 659,
+   "name": "chopping board, cutting board",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 660,
+   "name": "mask",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 661,
+   "name": "log",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 662,
+   "name": "mouse, computer mouse",
+   "seen": true,
+   "coco_match": "mouse",
+   "rule": "exact:mouse"
+  },
+  {
+   "id": 663,
+   "name": "grill",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 664,
+   "name": "hole",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 665,
+   "name": "target",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 666,
+   "name": "trash bag",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 667,
+   "name": "chalk",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 668,
+   "name": "sticks",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 669,
+   "name": "balloon",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 670,
+   "name": "score",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 671,
+   "name": "hair spray",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 672,
+   "name": "roll",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 673,
+   "name": "runner",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 674,
+   "name": "engine",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 675,
+   "name": "inflatable glove",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 676,
+   "name": "games",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 677,
+   "name": "pallets",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 678,
+   "name": "baskets",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 679,
+   "name": "coop",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 680,
+   "name": "dvd player",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 681,
+   "name": "rocking horse",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 682,
+   "name": "buckets",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 683,
+   "name": "bread rolls",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 684,
+   "name": "shawl",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 685,
+   "name": "watering can",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 686,
+   "name": "spotlights",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 687,
+   "name": "post-it",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 688,
+   "name": "bowls",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 689,
+   "name": "security camera",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 690,
+   "name": "runner cloth",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 691,
+   "name": "lock",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 692,
+   "name": "alarm, warning device, alarm system",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 693,
+   "name": "side",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 694,
+   "name": "roulette",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 695,
+   "name": "bone",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 696,
+   "name": "cutlery",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 697,
+   "name": "pool balls",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 698,
+   "name": "wheels",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 699,
+   "name": "spice rack",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 700,
+   "name": "plant pots",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 701,
+   "name": "towel ring",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 702,
+   "name": "bread box",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 703,
+   "name": "video",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 704,
+   "name": "funfair",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 705,
+   "name": "breads",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 706,
+   "name": "tripod",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 707,
+   "name": "ironing board",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 708,
+   "name": "skimmer",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 709,
+   "name": "hollow",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 710,
+   "name": "scratching post",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 711,
+   "name": "tricycle",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 712,
+   "name": "file box",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 713,
+   "name": "mountain pass",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 714,
+   "name": "tombstones",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 715,
+   "name": "cooker",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 716,
+   "name": "card game, cards",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 717,
+   "name": "golf bag",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 718,
+   "name": "towel paper",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 719,
+   "name": "chaise lounge",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 720,
+   "name": "sun",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 721,
+   "name": "toilet paper holder",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 722,
+   "name": "rake",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 723,
+   "name": "key",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 724,
+   "name": "umbrella stand",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 725,
+   "name": "dartboard",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 726,
+   "name": "transformer",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 727,
+   "name": "fireplace utensils",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 728,
+   "name": "sweatshirts",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 729,
+   "name": "cellular telephone, cellular phone, cellphone, cell, mobile phone",
+   "seen": true,
+   "coco_match": "cell phone",
+   "rule": "synonym:cellular telephone"
+  },
+  {
+   "id": 730,
+   "name": "tallboy",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 731,
+   "name": "stapler",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 732,
+   "name": "sauna",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 733,
+   "name": "test tube",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 734,
+   "name": "palette",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 735,
+   "name": "shopping carts",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 736,
+   "name": "tools",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 737,
+   "name": "push button, push, button",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 738,
+   "name": "star",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 739,
+   "name": "roof rack",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 740,
+   "name": "barbed wire",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 741,
+   "name": "spray",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 742,
+   "name": "ear",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 743,
+   "name": "sponge",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 744,
+   "name": "racket",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 745,
+   "name": "tins",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 746,
+   "name": "eyeglasses",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 747,
+   "name": "file",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 748,
+   "name": "scarfs",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 749,
+   "name": "sugar bowl",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 750,
+   "name": "flip flop",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 751,
+   "name": "headstones",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 752,
+   "name": "laptop bag",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 753,
+   "name": "leash",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 754,
+   "name": "climbing frame",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 755,
+   "name": "suit hanger",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 756,
+   "name": "floor spotlight",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 757,
+   "name": "plate rack",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 758,
+   "name": "sewer",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 759,
+   "name": "hard drive",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 760,
+   "name": "sprinkler",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 761,
+   "name": "tools box",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 762,
+   "name": "necklace",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 763,
+   "name": "bulbs",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 764,
+   "name": "steel industry",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 765,
+   "name": "club",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 766,
+   "name": "jack",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 767,
+   "name": "door bars",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 768,
+   "name": "control panel, instrument panel, control board, board, panel",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 769,
+   "name": "hairbrush",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 770,
+   "name": "napkin holder",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 771,
+   "name": "office",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 772,
+   "name": "smoke detector",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 773,
+   "name": "utensils",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 774,
+   "name": "apron",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 775,
+   "name": "scissors",
+   "seen": true,
+   "coco_match": "scissors",
+   "rule": "exact:scissors"
+  },
+  {
+   "id": 776,
+   "name": "terminal",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 777,
+   "name": "grinder",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 778,
+   "name": "entry phone",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 779,
+   "name": "newspaper stand",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 780,
+   "name": "pepper shaker",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 781,
+   "name": "onions",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 782,
+   "name": "central processing unit, cpu, c p u , central processor, processor, mainframe",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 783,
+   "name": "tape",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 784,
+   "name": "bat",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 785,
+   "name": "coaster",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 786,
+   "name": "calculator",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 787,
+   "name": "potatoes",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 788,
+   "name": "luggage rack",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 789,
+   "name": "salt",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 790,
+   "name": "street number",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 791,
+   "name": "viewpoint",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 792,
+   "name": "sword",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 793,
+   "name": "cd",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 794,
+   "name": "rowing machine",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 795,
+   "name": "plug",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 796,
+   "name": "andiron, firedog, dog, dog-iron",
+   "seen": true,
+   "coco_match": "dog",
+   "rule": "exact:dog"
+  },
+  {
+   "id": 797,
+   "name": "pepper",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 798,
+   "name": "tongs",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 799,
+   "name": "bonfire",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 800,
+   "name": "dog dish",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 801,
+   "name": "belt",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 802,
+   "name": "dumbbells",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 803,
+   "name": "videocassette recorder, vcr",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 804,
+   "name": "hook",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 805,
+   "name": "envelopes",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 806,
+   "name": "shower faucet",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 807,
+   "name": "watch",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 808,
+   "name": "padlock",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 809,
+   "name": "swimming pool ladder",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 810,
+   "name": "spanners",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 811,
+   "name": "gravy boat",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 812,
+   "name": "notice board",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 813,
+   "name": "trash bags",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 814,
+   "name": "fire alarm",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 815,
+   "name": "ladle",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 816,
+   "name": "stethoscope",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 817,
+   "name": "rocket",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 818,
+   "name": "funnel",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 819,
+   "name": "bowling pins",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 820,
+   "name": "valve",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 821,
+   "name": "thermometer",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 822,
+   "name": "cups",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 823,
+   "name": "spice jar",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 824,
+   "name": "night light",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 825,
+   "name": "soaps",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 826,
+   "name": "games table",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 827,
+   "name": "slotted spoon",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 828,
+   "name": "reel",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 829,
+   "name": "scourer",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 830,
+   "name": "sleeping robe",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 831,
+   "name": "desk mat",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 832,
+   "name": "dumbbell",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 833,
+   "name": "hammer",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 834,
+   "name": "tie",
+   "seen": true,
+   "coco_match": "tie",
+   "rule": "exact:tie"
+  },
+  {
+   "id": 835,
+   "name": "typewriter",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 836,
+   "name": "shaker",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 837,
+   "name": "cheese dish",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 838,
+   "name": "sea star",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 839,
+   "name": "racquet",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 840,
+   "name": "butane gas cylinder",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 841,
+   "name": "paper weight",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 842,
+   "name": "shaving brush",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 843,
+   "name": "sunglasses",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 844,
+   "name": "gear shift",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 845,
+   "name": "towel rail",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  },
+  {
+   "id": 846,
+   "name": "adding machine, totalizer, totaliser",
+   "seen": false,
+   "coco_match": null,
+   "rule": null
+  }
+ ]
+}
