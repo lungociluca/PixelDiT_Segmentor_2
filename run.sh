@@ -1,3 +1,1 @@
-
-export DETECTRON2_DATASETS="../datasets"; 
-python train_net.py --config-file configs/san_pixeldit_5blocks_cls.yaml --num-gpus 1 OUTPUT_DIR output_5blocks_cls;
+export DETECTRON2_DATASETS="../datasets"; python train_net.py --config-file configs/san_pixeldit_5blocks_joint_135.yaml --num-gpus 1 OUTPUT_DIR output_5blocks_joint_135

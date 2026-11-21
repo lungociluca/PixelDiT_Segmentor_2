@@ -9,7 +9,7 @@ MODEL:
   CONCEPT:
     LAYERS: [1, 2, 3, 4]
     TIMESTEP: 0.4
-    GT_MASKS: True
+    GT_MASKS: False
     LORA:
       ENABLED: True
       RANK: 16
@@ -21,9 +21,6 @@ MODEL:
       HOLDOUT_CLASSES: []
 SOLVER:
   BASE_LR: 0.0001
-  MAX_ITER: 999        # optimizer steps (each = IMS_PER_BATCH * GRAD_ACCUM_STEPS images)
+  MAX_ITER: 3000        # optimizer steps (each = IMS_PER_BATCH * GRAD_ACCUM_STEPS images)
 TEST:
-  EVAL_PERIOD: 3000
-
-# voc 22.3  23.6
-# ade 15.44 17.49
+  EVAL_PERIOD: 1000

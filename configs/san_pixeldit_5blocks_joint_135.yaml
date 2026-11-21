@@ -1,0 +1,28 @@
+# Joint training on a 5-block PixelDiT, no ground-truth masks at inference.
+#
+# Mask prediction: the side adapter is fed PixelDiT blocks 1, 3, 5.
+# Classification: concept attention from blocks 1-5 (LoRA on the text stream)
+# + mask-embedding head on the image tokens of blocks 3-5, trained on the
+# predicted masks matched to ground-truth segments.
+# Blocks built = max(FEATURE_LAYERS, CONCEPT.LAYERS, MASK_HEAD.LAYERS) = 5.
+#
+# FUSION_MAP "k->j": PixelDiT block k (the block number itself, which must be in
+# FEATURE_LAYERS) is added to the side ViT tokens before side block j.
+#
+# train:
+#   python train_net.py --config-file configs/san_pixeldit_5blocks_joint_135.yaml --num-gpus 1 OUTPUT_DIR output_5blocks_joint_135
+# eval:
+#   python train_net.py --config-file configs/san_pixeldit_5blocks_joint_135.yaml --num-gpus 1 \
+#     --eval-only MODEL.WEIGHTS output_5blocks_joint_135/model_final.pth OUTPUT_DIR output_5blocks_joint_135_eval
+_BASE_: san_pixeldit_5blocks_cls.yaml
+MODEL:
+  PIXELDIT:
+    FEATURE_LAYERS: [1, 3, 5]
+  SIDE_ADAPTER:
+    FUSION_MAP: ["1->0", "3->1", "5->2"]
+  CONCEPT:
+    GT_MASKS: False
+    LORA:
+      TRAIN_MODE: "joint"
+      LOSS_WEIGHT: 2.0       # as in san_pixeldit_concept_joint.yaml
+      DETACH_MASKS: True     # classification loss does not backprop into the side adapter
