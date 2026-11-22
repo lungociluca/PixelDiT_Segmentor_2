@@ -222,6 +222,11 @@ class SAN(nn.Module):
         image_lora_alpha: float = 16.0,
         image_lora_grad_checkpoint: bool = True,
         oracle_mask_stats: bool = True,
+        mask_timestep: float = 0.0,
+        mask_noise_seed: int = 0,
+        noise_side_adapter_input: bool = False,
+        query_objectness_threshold: float = 0.0,
+        query_top_k: int = 0,
     ):
         super().__init__()
         self.size_divisibility = 16
@@ -257,6 +262,21 @@ class SAN(nn.Module):
             raise ValueError(f"MODEL.CONCEPT.TIMESTEP must be < 1, got {concept_timestep}")
         self.concept_timestep = float(concept_timestep)
         self.concept_noise_seed = int(concept_noise_seed)
+        if mask_timestep >= 1:
+            raise ValueError(f"MODEL.PIXELDIT.TIMESTEP must be < 1, got {mask_timestep}")
+        self.mask_timestep = float(mask_timestep)
+        self.mask_noise_seed = int(mask_noise_seed)
+        self.noise_side_adapter_input = bool(noise_side_adapter_input)
+        if not 0.0 <= query_objectness_threshold < 1.0:
+            raise ValueError(
+                f"MODEL.SAN.QUERY_FILTER.OBJECTNESS_THRESHOLD must be in [0, 1), got {query_objectness_threshold}"
+            )
+        if query_top_k < 0:
+            raise ValueError(f"MODEL.SAN.QUERY_FILTER.TOP_K must be >= 0, got {query_top_k}")
+        self.query_objectness_threshold = float(query_objectness_threshold)
+        self.query_top_k = int(query_top_k)
+        # dataset_name -> [queries kept, images]
+        self.query_filter_stats = {}
         self.concept_gt_masks = concept_gt_masks
         # dataset_name -> [correctly classified GT segments, GT segments]
         self.concept_gt_stats = {}
@@ -266,11 +286,16 @@ class SAN(nn.Module):
         self.concept_cosine = concept_cosine and concept_lora
         self.concept_label_smoothing = concept_label_smoothing
         self.concept_adapter = None
-        if concept_train_mode not in ("gt_masks", "joint"):
+        if concept_train_mode not in ("gt_masks", "joint", "joint_gt"):
             raise ValueError(
-                f"MODEL.CONCEPT.LORA.TRAIN_MODE must be 'gt_masks' or 'joint', got {concept_train_mode!r}"
+                "MODEL.CONCEPT.LORA.TRAIN_MODE must be 'gt_masks', 'joint' or 'joint_gt', "
+                f"got {concept_train_mode!r}"
             )
-        self.concept_joint = concept_lora and concept_train_mode == "joint"
+        # Side adapter and classifier trained together ("joint", "joint_gt"); with
+        # "joint_gt" the classifier learns from the GT segments instead of the
+        # matched predicted masks.
+        self.concept_joint = concept_lora and concept_train_mode in ("joint", "joint_gt")
+        self.concept_joint_gt = concept_lora and concept_train_mode == "joint_gt"
         self.concept_loss_weight = concept_loss_weight
         self.concept_detach_masks = concept_detach_masks
 
@@ -435,7 +460,7 @@ class SAN(nn.Module):
         if concept_lora:
             # Trainable concept path. With TRAIN_MODE "gt_masks", training optimises
             # only the concept classifier (see concept_train_forward) and the side
-            # adapter is frozen; with "joint" both are trained.
+            # adapter is frozen; with "joint" / "joint_gt" both are trained.
             self.concept_adapter = ConceptLoRA(
                 hidden_size, self.concept_layers[-1], rank=concept_lora_rank, alpha=concept_lora_alpha
             )
@@ -558,6 +583,11 @@ class SAN(nn.Module):
             "image_lora_alpha": cfg.MODEL.CONCEPT.IMAGE_LORA.ALPHA,
             "image_lora_grad_checkpoint": cfg.MODEL.CONCEPT.IMAGE_LORA.GRAD_CHECKPOINT,
             "oracle_mask_stats": cfg.MODEL.SAN.ORACLE_CLASSES.MASK_STATS,
+            "mask_timestep": cfg.MODEL.PIXELDIT.TIMESTEP,
+            "mask_noise_seed": cfg.MODEL.PIXELDIT.NOISE_SEED,
+            "noise_side_adapter_input": cfg.MODEL.PIXELDIT.NOISE_SIDE_ADAPTER_INPUT,
+            "query_objectness_threshold": cfg.MODEL.SAN.QUERY_FILTER.OBJECTNESS_THRESHOLD,
+            "query_top_k": cfg.MODEL.SAN.QUERY_FILTER.TOP_K,
         }
     
     def embed_condition(self, prompts, with_chi_window=False):
@@ -644,6 +674,21 @@ class SAN(nn.Module):
             "concept_cosine": self.concept_cosine,
         }
 
+    @staticmethod
+    def _noise_image(image_tensor, t, seed, train):
+        """x_t = (1 - t) * image + t * noise, the flow PixelDiT was trained on
+        (t <= 0: the image unchanged). train: fresh noise; otherwise noise from
+        `seed`, identical for every batch so evaluation is reproducible."""
+        if t <= 0:
+            return image_tensor
+        g = None
+        if not train:
+            g = torch.Generator(device=image_tensor.device).manual_seed(seed)
+        noise = torch.randn(
+            image_tensor.shape, generator=g, device=image_tensor.device, dtype=image_tensor.dtype
+        )
+        return (1.0 - t) * image_tensor + t * noise
+
     def concept_pass(self, image_tensor, dataset_name, train=False, keep=None):
         """Backbone pass that only scores the class concepts, on the image noised
         to MODEL.CONCEPT.TIMESTEP: x_t = (1 - t) * image + t * noise (the flow the
@@ -653,15 +698,7 @@ class SAN(nn.Module):
                flow into the concept adapter.
         keep:  indices of the classes to use (default: the whole vocabulary)."""
         t = self.concept_timestep
-        x = image_tensor
-        if t > 0:
-            g = None
-            if not train:
-                g = torch.Generator(device=image_tensor.device).manual_seed(self.concept_noise_seed)
-            noise = torch.randn(
-                image_tensor.shape, generator=g, device=image_tensor.device, dtype=image_tensor.dtype
-            )
-            x = (1.0 - t) * image_tensor + t * noise
+        x = self._noise_image(image_tensor, t, self.concept_noise_seed, train)
         segment_data = {"feature_layers": list(self.mask_head_layers), **self._concept_inputs(dataset_name, keep)}
         if self.image_adapter is not None:
             segment_data["image_adapter"] = self.image_adapter
@@ -803,17 +840,24 @@ class SAN(nn.Module):
         """
         segment_data = {"feature_layers": self.feature_layers}
         use_concepts = self.concept_enabled and not self.training
-        # Concepts share this (clean image) pass only when no noise is requested;
-        # otherwise they get their own noised pass below.
+        # Mask path: PixelDiT sees x_t at MODEL.PIXELDIT.TIMESTEP (clean if <= 0).
+        t_mask = self.mask_timestep
+        noisy_image = self._noise_image(image_tensor, t_mask, self.mask_noise_seed, self.training)
+        # Concepts share this pass only when they ask for the same input: the same
+        # flow time and, with noise, the same noise (same seed; evaluation only, since
+        # training draws fresh noise). Otherwise they get their own pass below.
         # The mask head taps its own layers and the image adapter changes the image
         # stream, so either one needs the separate concept pass.
+        same_input = self.concept_timestep == t_mask if t_mask > 0 else self.concept_timestep <= 0
+        if t_mask > 0:
+            same_input = same_input and self.concept_noise_seed == self.mask_noise_seed
         share_pass = (
-            use_concepts and self.concept_timestep <= 0
+            use_concepts and same_input
             and self.mask_head is None and self.image_adapter is None
         )
         if share_pass:
             segment_data.update(self._concept_inputs(dataset_name))
-        self._run_backbone(image_tensor, segment_data)
+        self._run_backbone(noisy_image, segment_data, timestep=t_mask if t_mask > 0 else None)
 
         for k, v in segment_data["features"].items():
             if not torch.isfinite(v).all():
@@ -830,7 +874,8 @@ class SAN(nn.Module):
             k: v.detach().float().transpose(1, 2).reshape(v.shape[0], v.shape[-1], h, w)
             for k, v in segment_data["features"].items()
         }
-        mask_preds, mask_logits = self.side_adapter_network(image_tensor, backbone_features)
+        side_input = noisy_image if self.noise_side_adapter_input else image_tensor
+        mask_preds, mask_logits = self.side_adapter_network(side_input, backbone_features)
         concept_out = None
         if share_pass:
             concept_out = {
@@ -888,7 +933,13 @@ class SAN(nn.Module):
                 else:
                     # remove this loss if not specified in `weight_dict`
                     losses.pop(k)
-            if self.concept_joint and targets is not None:
+            if self.concept_joint_gt:
+                # Classifier on the GT segments (as in "gt_masks"), side adapter on
+                # its usual mask / objectness losses, in the same step.
+                cls_losses = self.concept_train_forward(batched_inputs, images, dataset_name)
+                for k, v in cls_losses.items():
+                    losses[k] = self.concept_loss_weight * v
+            elif self.concept_joint and targets is not None:
                 cls_losses = self.concept_joint_loss(
                     images_tensor, mask_preds[-1], gt_instances, self.criterion.last_indices, dataset_name
                 )
@@ -936,6 +987,8 @@ class SAN(nn.Module):
                 height = input_per_image.get("height", image_size[0])
                 width = input_per_image.get("width", image_size[1])
                 processed_results.append({})
+                # (Q, K + 1) object / no-object logits, before any replacement below.
+                query_logits = mask_cls_result
 
                 if concept_pixels is not None:
                     processed_results[-1]["sem_seg"] = retry_if_cuda_oom(sem_seg_postprocess)(
@@ -975,6 +1028,12 @@ class SAN(nn.Module):
                         objectness = F.softmax(mask_cls_result.float(), dim=-1)[:, :-1].sum(-1)
                         oracle = oracle * objectness[:, None]
                     mask_cls_result = oracle
+
+                # Only confident queries vote in the semantic map (QUERY_FILTER).
+                keep = self.select_queries(query_logits, dataset_name)
+                if keep is not None:
+                    mask_cls_result = mask_cls_result[keep]
+                    mask_pred_result = mask_pred_result[keep]
 
                 if self.sem_seg_postprocess_before_inference:
                     mask_pred_result = retry_if_cuda_oom(sem_seg_postprocess)(
@@ -1132,6 +1191,35 @@ class SAN(nn.Module):
                 }
             )
         return new_targets
+
+    @torch.no_grad()
+    def select_queries(self, query_logits, dataset_name):
+        """Indices of the queries allowed to vote in the semantic map
+        (MODEL.SAN.QUERY_FILTER), or None to keep all of them.
+
+        query_logits: (Q, K + 1) logits of the query class head, last column =
+        no object. P(object) = 1 - P(no object). Keeps the queries with
+        P(object) >= OBJECTNESS_THRESHOLD and, with TOP_K > 0, at most the TOP_K
+        most confident of them. At least the most confident query is always kept,
+        so that no image ends up with an empty map."""
+        if self.query_objectness_threshold <= 0 and self.query_top_k <= 0:
+            return None
+        objectness = F.softmax(query_logits.float(), dim=-1)[:, :-1].sum(-1)  # (Q,)
+        order = objectness.argsort(descending=True)
+        keep = order[objectness[order] >= self.query_objectness_threshold]
+        if self.query_top_k > 0:
+            keep = keep[: self.query_top_k]
+        if keep.numel() == 0:
+            keep = order[:1]
+        st = self.query_filter_stats.setdefault(dataset_name, [0, 0])
+        st[0] += int(keep.numel())
+        st[1] += 1
+        return keep
+
+    def queries_per_image(self, dataset_name):
+        """Mean number of queries kept by QUERY_FILTER per image (None if off)."""
+        st = self.query_filter_stats.get(dataset_name)
+        return st[0] / st[1] if st and st[1] else None
 
     def semantic_inference(self, mask_cls, mask_pred, cls_are_probs=False):
         # cls_are_probs: mask_cls is already (Q, C) class probabilities without the

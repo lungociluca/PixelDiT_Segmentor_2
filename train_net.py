@@ -93,7 +93,7 @@ class Trainer(DefaultTrainer):
         # Per-evaluation diagnostics kept by the model (GT-mask classification
         # accuracy, oracle mask statistics): reset before, reported after.
         core = model.module if hasattr(model, "module") else model
-        for attr in ("concept_gt_stats", "oracle_stats"):
+        for attr in ("concept_gt_stats", "oracle_stats", "query_filter_stats"):
             if isinstance(getattr(core, attr, None), dict):
                 getattr(core, attr).clear()
         results = super().test(cfg, model, evaluators)
@@ -105,6 +105,11 @@ class Trainer(DefaultTrainer):
                 logger.info(f"[{name}] GT-mask classification top-1: {acc:.2f}% of {gt[1]} segments")
                 if isinstance(results.get(name), dict):
                     results[name]["gt_mask_cls"] = {"top1": acc, "segments": gt[1]}
+            kept = core.queries_per_image(name) if hasattr(core, "queries_per_image") else None
+            if kept is not None:
+                logger.info(f"[{name}] query filter: {kept:.1f} queries kept per image")
+                if isinstance(results.get(name), dict):
+                    results[name]["query_filter"] = {"queries_per_image": kept}
             if hasattr(core, "mask_stats"):
                 stats = core.mask_stats(name)
                 if stats:

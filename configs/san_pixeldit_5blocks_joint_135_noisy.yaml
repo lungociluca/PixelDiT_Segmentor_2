@@ -1,0 +1,17 @@
+# As san_pixeldit_5blocks_joint_135.yaml, but the side adapter's PixelDiT pass
+# is noised too: both branches see x_t = 0.6 * image + 0.4 * noise, with the same
+# noise sample (fresh per step in training, MODEL.CONCEPT.NOISE_SEED at eval).
+# The flow times are equal and the image LoRA is off, so inference runs a single
+# PixelDiT pass for masks, concept scores and mask-head features.
+# The side ViT's own patch embedding still sees the clean image.
+#
+# train:
+#   python train_net.py --config-file configs/san_pixeldit_5blocks_joint_135_noisy.yaml --num-gpus 1 OUTPUT_DIR output_5blocks_joint_135_noisy
+# mask quality alone (oracle classes) on a checkpoint of this run:
+#   python train_net.py --config-file configs/san_pixeldit_mask_oracle.yaml --num-gpus 1 --eval-only \
+#     MODEL.WEIGHTS output_5blocks_joint_135_noisy/model_final.pth MODEL.PIXELDIT.TIMESTEP 0.4 \
+#     MODEL.PIXELDIT.FEATURE_LAYERS "[1, 3, 5]" MODEL.SIDE_ADAPTER.FUSION_MAP "['1->0', '3->1', '5->2']"
+_BASE_: san_pixeldit_5blocks_joint_135.yaml
+MODEL:
+  PIXELDIT:
+    TIMESTEP: 0.4   # = MODEL.CONCEPT.TIMESTEP

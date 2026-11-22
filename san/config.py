@@ -65,6 +65,15 @@ def add_san_config(cfg):
     cfg.MODEL.SAN.CLIP_RESOLUTION = 0.5
 
     cfg.MODEL.SAN.SEM_SEG_POSTPROCESS_BEFORE_INFERENCE = True
+    # Inference only: which queries vote in the semantic map. By default all of
+    # them do, each weighted by its objectness, so empty, duplicate and partial
+    # masks spread their (often wrong) classes over the image. Keep only queries
+    # with P(object) >= OBJECTNESS_THRESHOLD and, with TOP_K > 0, at most the TOP_K
+    # most confident ones (the most confident query is always kept). 0 / 0: off.
+    # Applies to every way of labelling the masks (learned, concept, oracle).
+    cfg.MODEL.SAN.QUERY_FILTER = CN()
+    cfg.MODEL.SAN.QUERY_FILTER.OBJECTNESS_THRESHOLD = 0.0
+    cfg.MODEL.SAN.QUERY_FILTER.TOP_K = 0
     # Oracle mask classification (inference only): replace the predicted class
     # scores of every mask with the ground-truth class it overlaps best, so that
     # evaluation measures only the quality of the class-agnostic masks.
@@ -168,8 +177,11 @@ def add_san_config(cfg):
     #             the Hungarian matcher assigns to a ground-truth segment is
     #             classified with the concept scores pooled over that predicted
     #             mask; cross-entropy against the segment's class.
+    # "joint_gt": train both together like "joint", but the classifier learns from
+    #             the ground-truth segments (as in "gt_masks"), not from the
+    #             predicted masks; the side adapter gets its usual losses.
     cfg.MODEL.CONCEPT.LORA.TRAIN_MODE = "gt_masks"
-    # Weight of that cross-entropy ("joint" only; "gt_masks" uses 1).
+    # Weight of that cross-entropy ("joint" / "joint_gt"; "gt_masks" uses 1).
     cfg.MODEL.CONCEPT.LORA.LOSS_WEIGHT = 2.0
     # "joint" only: stop the classification loss from flowing into the masks.
     # False lets the classifier reshape the masks (end-to-end, as in SAN), which
@@ -219,6 +231,18 @@ def add_san_config(cfg):
     #         trained in bf16; float16 lacks its range and can overflow to inf/NaN).
     # "float32": always float32.  "amp": always the autocast dtype, even float16.
     cfg.MODEL.PIXELDIT.PRECISION = "auto"
+    # Flow time of the PixelDiT pass that feeds the side adapter (mask path), =
+    # fraction of noise: the input is (1 - t) * image + t * gaussian noise, the same
+    # flow as MODEL.CONCEPT.TIMESTEP for the class path. <= 0: clean image at
+    # t2i.config.timestep (previous behaviour). Training draws fresh noise every
+    # step; evaluation uses NOISE_SEED, so it is reproducible. When this equals
+    # MODEL.CONCEPT.TIMESTEP (and the seeds match, and there is no MASK_HEAD /
+    # IMAGE_LORA) masks and classes share one backbone pass at inference.
+    cfg.MODEL.PIXELDIT.TIMESTEP = 0.0
+    cfg.MODEL.PIXELDIT.NOISE_SEED = 0
+    # Also give the side ViT the noised image as its own RGB input (default: only
+    # PixelDiT sees the noise, the side ViT keeps the clean image).
+    cfg.MODEL.PIXELDIT.NOISE_SIDE_ADAPTER_INPUT = False
     # side adapter
     cfg.MODEL.SIDE_ADAPTER = CN()
     # "PixelDiTSideAdapterNetwork": masks + objectness, fused with PixelDiT features.
