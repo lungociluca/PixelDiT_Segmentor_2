@@ -76,6 +76,6 @@ SOLVER:
   # smaller micro-batches, same 32 images per optimizer step as 16 x 2.
   IMS_PER_BATCH: 8
   GRAD_ACCUM_STEPS: 4
-  MAX_ITER: 3000
+  MAX_ITER: 500
 TEST:
   EVAL_PERIOD: 1000
