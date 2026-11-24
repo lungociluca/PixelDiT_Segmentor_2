@@ -2,8 +2,8 @@ DATASETS:
   TRAIN: ("coco_2017_train_stuff_sem_seg",)
   TEST: ('voc_sem_seg_val', 'ade20k_sem_seg_val') # ('coco_2017_test_stuff_sem_seg', 'voc_sem_seg_val','pcontext_sem_seg_val','ade20k_sem_seg_val','pcontext_full_sem_seg_val','ade20k_full_sem_seg_val')
 SOLVER:
-  IMS_PER_BATCH: 16      # micro-batch per GPU step (what has to fit in memory)
-  GRAD_ACCUM_STEPS: 2   # optimizer step every 4 micro-batches -> effective batch 4
+  IMS_PER_BATCH: 8      # micro-batch per GPU step (what has to fit in memory)
+  GRAD_ACCUM_STEPS: 4   # optimizer step every 4 micro-batches -> effective batch 4
   BASE_LR: 0.0001
   MAX_ITER: 100
   WARMUP_FACTOR: 1.0

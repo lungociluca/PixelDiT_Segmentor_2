@@ -1,12 +1,14 @@
 """Side adapter network for a frozen PixelDiT backbone.
 
 Same side ViT, learnable queries and feature fusion as SAN's
-RegionwiseSideAdapterNetwork, but the CLIP-specific attention-bias branch is
-removed: there is no CLIP recognition head to feed. Instead each query predicts
-a mask and a class-agnostic objectness score (object / no object).
+RegionwiseSideAdapterNetwork. Each query predicts a mask and a class-agnostic
+objectness score (object / no object). With MODEL.REC.ENABLED SAN's
+attention-bias branch is back: each query also predicts, for every recognition
+block and every PixelDiT attention head, a bias map over the patch grid, which
+steers that query's mask token in the frozen PixelDiT (san.model.rec_head).
 """
 from functools import partial
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 from detectron2.layers import ShapeSpec
@@ -19,7 +21,12 @@ from .timm_wrapper import PatchEmbed
 
 
 class MaskObjectnessDecoder(nn.Module):
-    """Query/pixel MLPs -> mask logits, plus a linear class head on the queries."""
+    """Query/pixel MLPs -> mask logits, plus a linear class head on the queries.
+
+    bias_heads > 0 adds SAN's attention-bias branch (as in MLPMaskDecoder):
+    attn_bias[b, l, n, q] = <query_embed[b, q], attn_mlp(x)[b, l, n]> for
+    `bias_layers` recognition blocks l and `bias_heads` heads n, optionally
+    rescaled by a learned affine map (RESCALE_ATTN_BIAS)."""
 
     def __init__(
         self,
@@ -29,25 +36,37 @@ class MaskObjectnessDecoder(nn.Module):
         embed_channels: int = 256,
         mlp_channels: int = 256,
         mlp_num_layers: int = 3,
+        bias_heads: int = 0,
+        bias_layers: int = 1,
+        rescale_attn_bias: bool = False,
     ):
         super().__init__()
         # Query branch (same as SAN's MLPMaskDecoder).
         self.query_mlp = MLP(in_channels, mlp_channels, embed_channels, mlp_num_layers)
         # Pixel branch: 1x1 convs on the dense side features.
-        self.pix_mlp = MLP(
-            in_channels,
-            mlp_channels,
-            embed_channels,
-            mlp_num_layers,
-            affine_func=partial(nn.Conv2d, kernel_size=1),
-        )
+        dense = partial(nn.Conv2d, kernel_size=1)
+        self.pix_mlp = MLP(in_channels, mlp_channels, embed_channels, mlp_num_layers, affine_func=dense)
         # num_classes + 1 logits, last one = no object (Mask2Former convention).
         self.class_embed = nn.Linear(in_channels, num_classes + 1)
+        # Attention-bias branch (SAN).
+        self.bias_heads = int(bias_heads)
+        self.bias_layers = int(bias_layers)
+        if self.bias_heads > 0:
+            self.attn_mlp = MLP(
+                in_channels,
+                mlp_channels,
+                embed_channels * self.bias_heads * self.bias_layers,
+                mlp_num_layers,
+                affine_func=dense,
+            )
+            self.bias_scaling = nn.Linear(1, 1) if rescale_attn_bias else nn.Identity()
 
     def forward(
-        self, query: torch.Tensor, x: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        self, query: torch.Tensor, x: torch.Tensor, with_bias: bool = True
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[List[torch.Tensor]]]:
         # query: [B,N,C]  x: [B,C,H,W]
+        # Returns mask_preds [B,N,H,W], class_logits [B,N,K+1] and, with the bias
+        # branch (and with_bias), one [B,heads,N,H,W] fp32 bias per recognition block.
         class_logits = self.class_embed(query)  # [B,N,K+1]
         query_embed = self.query_mlp(query)
         pix_embed = self.pix_mlp(x)
@@ -57,7 +76,15 @@ class MaskObjectnessDecoder(nn.Module):
             mask_preds = torch.einsum(
                 "bqc,bchw->bqhw", query_embed.float(), pix_embed.float()
             )  # [B,N,H,W]
-        return mask_preds, class_logits
+        attn_bias = None
+        if self.bias_heads > 0 and with_bias:
+            b, _, h, w = x.shape
+            attn = self.attn_mlp(x).reshape(b, self.bias_layers, self.bias_heads, -1, h, w)
+            with torch.autocast(query.device.type, enabled=False):
+                bias = torch.einsum("bqc,blnchw->blnqhw", query_embed.float(), attn.float())
+                bias = self.bias_scaling(bias[..., None]).squeeze(-1)
+            attn_bias = [bias[:, j] for j in range(self.bias_layers)]
+        return mask_preds, class_logits, attn_bias
 
 
 @SIDE_ADAPTER_REGISTRY.register()
@@ -68,10 +95,13 @@ class PixelDiTSideAdapterNetwork(RegionwiseSideAdapterNetwork):
     patch block k) to its ShapeSpec. MODEL.SIDE_ADAPTER.FUSION_MAP entries
     "k->j" add PixelDiT layer k to the side ViT tokens before side block j.
 
-    forward(image, features) returns two lists, one entry per deep-supervision
+    forward(image, features) returns three lists, one entry per deep-supervision
     block during training (only the last one at inference):
       mask_preds:   [B, N, h, w] mask logits on the side ViT's patch grid
       class_logits: [B, N, K + 1] (K = 1 for class-agnostic training)
+      attn_biases:  with MODEL.REC.ENABLED, for the last block only, a list with
+                    one [B, heads, N, h, w] bias per MODEL.REC.LAYERS entry;
+                    None for every other entry and without MODEL.REC
     """
 
     @classmethod
@@ -127,18 +157,25 @@ class PixelDiTSideAdapterNetwork(RegionwiseSideAdapterNetwork):
                 embed_channels=sa.ATTN_BIAS.EMBED_CHANNELS,
                 mlp_channels=sa.ATTN_BIAS.MLP_CHANNELS,
                 mlp_num_layers=sa.ATTN_BIAS.MLP_NUM_LAYERS,
+                bias_heads=sa.ATTN_BIAS.NUM_HEADS if cfg.MODEL.REC.ENABLED else 0,
+                bias_layers=len(cfg.MODEL.REC.LAYERS),
+                rescale_attn_bias=sa.ATTN_BIAS.RESCALE_ATTN_BIAS,
             ),
             "deep_supervision_idxs": sa.DEEP_SUPERVISION_IDXS,
         }
 
     def decode_masks(
         self, features: List[Dict[str, torch.Tensor]]
-    ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+    ) -> Tuple[List[torch.Tensor], List[torch.Tensor], List[Optional[List[torch.Tensor]]]]:
         if not self.training:
             features = [features[-1]]
-        mask_preds, class_logits = [], []
-        for feature in features:
-            mask_pred, class_logit = self.mask_decoder(**feature)
+        mask_preds, class_logits, attn_biases = [], [], []
+        for j, feature in enumerate(features):
+            # Only the final output is classified: no bias for deep supervision.
+            mask_pred, class_logit, attn_bias = self.mask_decoder(
+                **feature, with_bias=j == len(features) - 1
+            )
             mask_preds.append(mask_pred)
             class_logits.append(class_logit)
-        return mask_preds, class_logits
+            attn_biases.append(attn_bias)
+        return mask_preds, class_logits, attn_biases

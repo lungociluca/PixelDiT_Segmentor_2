@@ -102,6 +102,70 @@ def test_encode():
     assert start_ctx == start + len(ctx.split())
 
 
+class PaddingFakeTokenizer(FakeTokenizer):
+    """FakeTokenizer that also takes a batch of prompts padded to max_length."""
+
+    def __call__(self, text, add_special_tokens=True, return_tensors=None, max_length=None,
+                 padding=None, truncation=False):
+        if isinstance(text, str):
+            return super().__call__(text, add_special_tokens, return_tensors)
+        rows = [([0] + self._ids(t))[:max_length] for t in text]
+        ids = torch.zeros(len(rows), max_length, dtype=torch.long)
+        mask = torch.zeros_like(ids)
+        for i, r in enumerate(rows):
+            ids[i, : len(r)], mask[i, : len(r)] = torch.tensor(r), 1
+
+        class Out:
+            pass
+
+        out = Out()
+        out.input_ids, out.attention_mask = ids, mask
+        out.to = lambda device: out
+        return out
+
+
+def test_text_cache(tmp_dir="/tmp/text_cache_test"):
+    from san.model.text_cache import build_text_spec, compute_text_cache, load_text_cache, save_text_cache
+
+    tok, enc = PaddingFakeTokenizer(), FakeEncoder()
+    spec = build_text_spec(
+        "fake", "Do things. User Prompt: a scene", ["A picture of a {target}", "A photo of the {target}."],
+        "mean", True, True, True, {"coco": ["cat", "dining table", "person-other"], "voc": ["cat", "dog"]},
+    )
+    cache = compute_text_cache(tok, enc, spec, "cpu", log=lambda *_: None)
+    assert cache["default"]["emb"].shape == (1, 1, 300, 64) and cache["default"]["mask"].shape == (1, 300)
+    assert int(cache["default"]["tokens_count"]) == 1 + len(spec["default_prompt"].split())
+    # Same numbers as encoding directly.
+    embs, cls, pos = encode_concepts(
+        tok, enc, ["cat", "dining table", "person-other"], template=spec["templates"], device="cpu",
+        context=instruction_prefix(spec["default_prompt"]), clean_names=True, split_synonyms=True,
+    )
+    c = cache["concepts"]["coco"]
+    assert torch.equal(c["embs"], embs) and torch.equal(c["variant_class"], cls) and c["position"] == pos
+
+    path = os.path.join(tmp_dir, "cache.pt")
+    save_text_cache(path, cache)
+    loaded = load_text_cache(path, spec)
+    assert torch.equal(loaded["concepts"]["voc"]["embs"], cache["concepts"]["voc"]["embs"])
+    # A subset of the datasets is fine; other settings or class names are refused.
+    load_text_cache(path, dict(spec, datasets={"voc": ["cat", "dog"]}), datasets=["voc"])
+    for bad, kwargs in [
+        (dict(spec, pool="last"), {}),
+        (dict(spec, datasets={"voc": ["cat", "bird"]}), {"datasets": ["voc"]}),
+        (dict(spec, datasets={"ade": ["wall"]}), {"datasets": ["ade"]}),
+    ]:
+        try:
+            load_text_cache(path, bad, **kwargs)
+            raise AssertionError(f"stale cache accepted for {kwargs}")
+        except ValueError:
+            pass
+    try:
+        load_text_cache(os.path.join(tmp_dir, "missing.pt"), spec)
+        raise AssertionError("missing cache accepted")
+    except FileNotFoundError:
+        pass
+
+
 def test_instruction_prefix():
     p = "Do things. User Prompt: A cat -> x. More. User Prompt: A picture with sky."
     assert instruction_prefix(p) == "Do things. User Prompt: A cat -> x. More. User Prompt: "
@@ -112,4 +176,5 @@ if __name__ == "__main__":
     test_reduce()
     test_encode()
     test_instruction_prefix()
+    test_text_cache()
     print("all concept text tests passed")

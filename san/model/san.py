@@ -20,12 +20,12 @@ from .concept_classifier import (
     ConceptLoRA,
     ConceptMaskClassifier,
     MaskEmbedHead,
-    encode_concepts,
     ensemble_probs,
-    instruction_prefix,
     reduce_synonyms,
 )
 from .criterion import SetCriterion
+from .rec_head import AttnBiasMaskRecognizer
+from .text_cache import build_text_spec, compute_text_cache, embed_prompts, load_text_cache
 from .matcher import HungarianMatcher
 from .side_adapter import build_side_adapter_network
 from ..utils.amp import resolve_amp_dtype, resolve_backbone_dtype
@@ -95,9 +95,27 @@ def set_env(seed=0, latent_size=256):
     for _ in range(30):
         torch.randn(1, 4, latent_size, latent_size)
 
-def get_model():
-    args = Namespace(config='diffusion_configs/PixelDiT_1024px_pixel_diffusion_stage3.yaml')
-    config = args = pyrallis.parse(config_class=PixelDiTInference, config_path=args.config, args=[])
+PIXELDIT_CONFIG = 'diffusion_configs/PixelDiT_1024px_pixel_diffusion_stage3.yaml'
+
+
+def load_pixeldit_config():
+    return pyrallis.parse(config_class=PixelDiTInference, config_path=PIXELDIT_CONFIG, args=[])
+
+
+def load_text_encoder(config=None, device=None):
+    """The frozen text encoder (Gemma) and its tokenizer."""
+    config = config or load_pixeldit_config()
+    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    tokenizer, text_encoder = get_tokenizer_and_text_encoder(name=config.text_encoder.text_encoder_name, device=device)
+    for param in text_encoder.parameters():
+        param.requires_grad = False
+    return tokenizer, text_encoder.eval()
+
+
+def get_model(with_text_encoder=True):
+    """Frozen PixelDiT, and its tokenizer / text encoder (None, None without
+    `with_text_encoder`, when the text outputs come from MODEL.TEXT_CACHE)."""
+    config = args = load_pixeldit_config()
     from t2i.tools.download import resolve_checkpoint
     args.model_path = resolve_checkpoint("t2i/pixeldit_t2i_v1.pth")
 
@@ -127,18 +145,9 @@ def get_model():
     weight_dtype = get_weight_dtype(config.model.mixed_precision)
     logger.info(f"Inference with {weight_dtype}, guidance_type: {guidance_type}, flow_shift: {flow_shift}")
 
-    tokenizer, text_encoder = get_tokenizer_and_text_encoder(name=config.text_encoder.text_encoder_name, device=device)
-    for param in text_encoder.parameters():
-        param.requires_grad = False
-
-    null_caption_token = tokenizer(
-        args.negative_prompt if hasattr(args, "negative_prompt") and len(args.negative_prompt) > 0 else "",
-        max_length=max_sequence_length,
-        padding="max_length",
-        truncation=True,
-        return_tensors="pt",
-    ).to(device)
-    null_caption_embs = text_encoder(null_caption_token.input_ids, null_caption_token.attention_mask, use_cache=False)[0]
+    tokenizer = text_encoder = None
+    if with_text_encoder:
+        tokenizer, text_encoder = load_text_encoder(config, device)
 
     # model setting
     model_kwargs = model_init_config(config, latent_size=latent_size)
@@ -158,7 +167,7 @@ def get_model():
         del state_dict["state_dict"]["pos_embed"]
 
     missing, unexpected = model.load_state_dict(state_dict["state_dict"], strict=False)
-    return model.eval().to(torch.float32), tokenizer, text_encoder.eval()
+    return model.eval().to(torch.float32), tokenizer, text_encoder
 
 
 @META_ARCH_REGISTRY.register()
@@ -227,6 +236,18 @@ class SAN(nn.Module):
         noise_side_adapter_input: bool = False,
         query_objectness_threshold: float = 0.0,
         query_top_k: int = 0,
+        rec_enabled: bool = False,
+        rec_layers: Optional[List[int]] = None,
+        rec_query_init: str = "global",
+        rec_self_attn: bool = True,
+        rec_init_logit_scale: float = 20.0,
+        rec_label_smoothing: float = 0.0,
+        rec_loss_weight: float = 2.0,
+        rec_timestep: float = -1.0,
+        rec_noise_seed: int = 0,
+        rec_weight_by_objectness: bool = True,
+        rec_holdout_classes: Optional[List[str]] = None,
+        text_cache_path: str = "",
     ):
         super().__init__()
         self.size_divisibility = 16
@@ -323,12 +344,32 @@ class SAN(nn.Module):
         # dataset_name -> [sum of best IoU, GT segments, recalled @0.5, @0.75, masks kept, images]
         self.oracle_stats = {}
 
+        # SAN-style recognition with a learned attention bias (MODEL.REC).
+        self.rec_enabled = bool(rec_enabled)
+        self.rec_layers = sorted(set(int(k) for k in (rec_layers or []))) if rec_enabled else []
+        if rec_enabled:
+            if concept_enabled or oracle_classes:
+                raise ValueError(
+                    "MODEL.REC.ENABLED labels the masks itself; disable MODEL.CONCEPT.ENABLED "
+                    "and MODEL.SAN.ORACLE_CLASSES.ENABLED."
+                )
+            if not self.rec_layers or self.rec_layers[0] < 1:
+                raise ValueError(f"MODEL.REC.LAYERS must list PixelDiT blocks >= 1, got {rec_layers}")
+            if rec_timestep >= 1:
+                raise ValueError(f"MODEL.REC.TIMESTEP must be < 1, got {rec_timestep}")
+        self.rec_label_smoothing = float(rec_label_smoothing)
+        self.rec_loss_weight = float(rec_loss_weight)
+        self.rec_timestep = float(rec_timestep)
+        self.rec_noise_seed = int(rec_noise_seed)
+        self.rec_weight_by_objectness = bool(rec_weight_by_objectness)
+        self.rec_head = None
+
         self.class_agnostic = class_agnostic
-        if class_agnostic and not (oracle_classes or concept_enabled):
+        if class_agnostic and not (oracle_classes or concept_enabled or rec_enabled):
             raise ValueError(
                 "MODEL.SAN.CLASS_AGNOSTIC predicts no classes, so it needs "
-                "MODEL.CONCEPT.ENABLED or MODEL.SAN.ORACLE_CLASSES.ENABLED to label the "
-                "masks at inference."
+                "MODEL.REC.ENABLED, MODEL.CONCEPT.ENABLED or MODEL.SAN.ORACLE_CLASSES.ENABLED "
+                "to label the masks at inference."
             )
 
         # PixelDiT layers fed to the side adapter (0 = patch embedding, k = block k).
@@ -338,14 +379,20 @@ class SAN(nn.Module):
             raise ValueError(f"MODEL.PIXELDIT.FEATURE_LAYERS must be non-negative, got {feature_layers}")
         # Blocks built = deepest layer needed by the side adapter or by the concept
         # classifier. Training only runs the side adapter's layers.
-        local_config.layer_count = max(self.feature_layers[-1], self.concept_depth)
+        local_config.layer_count = max(
+            [self.feature_layers[-1], self.concept_depth] + self.rec_layers
+        )
 
-        self.model, self.tokenizer, self.text_encoder = get_model()
+        self.model, self.tokenizer, self.text_encoder = get_model(with_text_encoder=not text_cache_path)
         num_blocks = len(self.model.core.patch_blocks)
         if self.feature_layers[-1] > num_blocks:
             raise ValueError(
                 f"MODEL.PIXELDIT.FEATURE_LAYERS {self.feature_layers} goes deeper than the "
                 f"{num_blocks} PixelDiT patch blocks."
+            )
+        if self.rec_layers and self.rec_layers[-1] > num_blocks:
+            raise ValueError(
+                f"MODEL.REC.LAYERS {self.rec_layers} go deeper than the {num_blocks} PixelDiT patch blocks."
             )
         if concept_enabled and self.concept_depth > num_blocks:
             raise ValueError(
@@ -353,17 +400,54 @@ class SAN(nn.Module):
                 f"{self.mask_head_layers} go deeper than the {num_blocks} PixelDiT patch blocks."
             )
 
-        # The diffusion model is always conditioned on the dataset-agnostic default prompt.
-        default_emb, default_mask, default_tokens = self.embed_condition([local_config.default_prompt])
-        self.default_emb = default_emb.to(torch.float32)      # (1, 1, 300, D)
-        self.default_emb_mask = default_mask                  # (1, 300)
-        self.default_tokens_count = default_tokens[0]
-
         # Class names per dataset (order = contiguous GT class ids).
         self.default_dataset = train_dataset_names[0]
         self.class_labels = {}   # dataset_name -> List[str]
         for name in dict.fromkeys(list(train_dataset_names) + list(test_dataset_names)):
             self.class_labels[name] = get_dataset_labels(name)
+
+        # Text-encoder outputs: the default prompt and the class-name concepts,
+        # from MODEL.TEXT_CACHE.PATH or computed here with Gemma.
+        templates = list(concept_templates or []) or [concept_template]
+        text_spec = build_text_spec(
+            text_encoder_name=load_pixeldit_config().text_encoder.text_encoder_name,
+            default_prompt=local_config.default_prompt,
+            templates=templates,
+            pool=concept_pool,
+            instruction_context=concept_instruction_context,
+            clean_names=concept_clean_names,
+            split_synonyms=concept_split_synonyms,
+            dataset_labels=self.class_labels,
+        )
+        need_concepts = concept_enabled or rec_enabled
+        if text_cache_path:
+            text_cache = load_text_cache(
+                text_cache_path,
+                text_spec,
+                datasets=list(self.class_labels) if need_concepts else [],
+                precompute_hint=(
+                    "python tools/precompute_text_embeddings.py --config-file <this config> "
+                    f"MODEL.TEXT_CACHE.PATH {text_cache_path}"
+                ),
+            )
+            get_root_logger().info(
+                f"Text-encoder outputs loaded from {text_cache_path} (spec {text_cache['digest']}); "
+                "Gemma not loaded."
+            )
+        else:
+            text_cache = compute_text_cache(
+                self.tokenizer,
+                self.text_encoder,
+                dict(text_spec, datasets=text_spec["datasets"] if need_concepts else {}),
+                local_config.device,
+                log=get_root_logger().info,
+            )
+
+        # The diffusion model is always conditioned on the dataset-agnostic default prompt.
+        default = text_cache["default"]
+        self.default_emb = default["emb"].to(local_config.device, torch.float32)  # (1, 1, 300, D)
+        self.default_emb_mask = default["mask"].to(local_config.device)           # (1, 300)
+        self.default_tokens_count = default["tokens_count"].to(local_config.device)
 
         # One concept vector per class name, per dataset (needs the text encoder,
         # so computed before it is dropped). dataset_name -> (K, txt_embed_dim).
@@ -386,24 +470,16 @@ class SAN(nn.Module):
                 num_layers=len(self.concept_layers),
                 init_logit_scale=concept_init_logit_scale,
             )
-            templates = list(concept_templates or []) or [concept_template]
-            context = instruction_prefix(local_config.default_prompt) if concept_instruction_context else ""
-            for name, labels in self.class_labels.items():
-                embs, variant_class, self.concept_position = encode_concepts(
-                    self.tokenizer,
-                    self.text_encoder,
-                    labels,
-                    template=templates,
-                    pool=concept_pool,
-                    device=local_config.device,
-                    context=context,
-                    clean_names=concept_clean_names,
-                    split_synonyms=concept_split_synonyms,
-                )
-                self.concept_embs[name] = embs
-                self.concept_variant_class[name] = variant_class.to(local_config.device)
+        if need_concepts:
+            # Class-name concept tokens (also the class side of MODEL.REC).
+            for name in self.class_labels:
+                c = text_cache["concepts"][name]
+                self.concept_embs[name] = c["embs"].to(local_config.device, torch.float32)
+                self.concept_variant_class[name] = c["variant_class"].to(local_config.device)
+                self.concept_position = c["position"]
             get_root_logger().info(
-                f"Concept classifier: PixelDiT layers {self.concept_layers}, "
+                f"Concept tokens for {'MODEL.REC' if rec_enabled else 'the concept classifier'}: "
+                f"PixelDiT layers {self.rec_layers if rec_enabled else self.concept_layers}, "
                 f"{ {k: v.shape[0] for k, v in self.concept_embs.items()} } concepts "
                 f"({len(templates)} templates, instruction context {concept_instruction_context}), "
                 f"text position {self.concept_position}"
@@ -412,14 +488,14 @@ class SAN(nn.Module):
         # Training vocabulary without the held-out classes:
         # dataset_name -> (indices of the kept classes, class id -> new id or -1).
         self.concept_train_vocab = {}
-        holdout = set(concept_holdout_classes or [])
-        if concept_lora and holdout:
+        holdout = set((concept_holdout_classes if concept_lora else rec_holdout_classes) or [])
+        if (concept_lora or rec_enabled) and holdout:
             for name in train_dataset_names:
                 labels = self.class_labels[name]
                 unknown = holdout - set(labels)
                 if unknown:
                     raise ValueError(
-                        f"MODEL.CONCEPT.LORA.HOLDOUT_CLASSES {sorted(unknown)} are not classes of '{name}'."
+                        f"HOLDOUT_CLASSES {sorted(unknown)} are not classes of '{name}'."
                     )
                 keep = torch.tensor(
                     [i for i, l in enumerate(labels) if l not in holdout],
@@ -429,8 +505,12 @@ class SAN(nn.Module):
                 remap[keep] = torch.arange(keep.numel(), device=local_config.device)
                 self.concept_train_vocab[name] = (keep, remap)
 
+        # The text encoder is not needed after this point.
         del self.tokenizer
         del self.text_encoder
+        del text_cache
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         # amp_dtype: autocast dtype of the trainable side adapter (None = fp32).
         # backbone_dtype: dtype the frozen PixelDiT is stored and run in. The two
@@ -456,6 +536,28 @@ class SAN(nn.Module):
             side_adapter_cfg,
             {k: ShapeSpec(channels=hidden_size) for k in self.feature_layers},
         )
+
+        if rec_enabled:
+            sa = side_adapter_cfg.MODEL.SIDE_ADAPTER
+            n_heads = self.model.core.patch_blocks[self.rec_layers[0] - 1].attn.num_heads
+            if not sa.NAME == "PixelDiTSideAdapterNetwork":
+                raise ValueError("MODEL.REC needs MODEL.SIDE_ADAPTER.NAME 'PixelDiTSideAdapterNetwork'.")
+            if sa.ATTN_BIAS.NUM_HEADS not in (1, n_heads):
+                raise ValueError(
+                    f"MODEL.SIDE_ADAPTER.ATTN_BIAS.NUM_HEADS must be 1 or the {n_heads} PixelDiT "
+                    f"heads with MODEL.REC, got {sa.ATTN_BIAS.NUM_HEADS}"
+                )
+            self.rec_head = AttnBiasMaskRecognizer(
+                self.rec_layers,
+                query_init=rec_query_init,
+                self_attn=rec_self_attn,
+                init_logit_scale=rec_init_logit_scale,
+            )
+            get_root_logger().info(
+                f"MODEL.REC: mask tokens through PixelDiT blocks {self.rec_layers}, "
+                f"{sa.ATTN_BIAS.NUM_HEADS} bias map(s) per query, query init {rec_query_init!r}, "
+                + ("shared backbone pass" if self.rec_timestep < 0 else f"own pass at t={self.rec_timestep}")
+            )
 
         if concept_lora:
             # Trainable concept path. With TRAIN_MODE "gt_masks", training optimises
@@ -588,21 +690,25 @@ class SAN(nn.Module):
             "noise_side_adapter_input": cfg.MODEL.PIXELDIT.NOISE_SIDE_ADAPTER_INPUT,
             "query_objectness_threshold": cfg.MODEL.SAN.QUERY_FILTER.OBJECTNESS_THRESHOLD,
             "query_top_k": cfg.MODEL.SAN.QUERY_FILTER.TOP_K,
+            "rec_enabled": cfg.MODEL.REC.ENABLED,
+            "rec_layers": list(cfg.MODEL.REC.LAYERS),
+            "rec_query_init": cfg.MODEL.REC.QUERY_INIT,
+            "rec_self_attn": cfg.MODEL.REC.SELF_ATTN,
+            "rec_init_logit_scale": cfg.MODEL.REC.INIT_LOGIT_SCALE,
+            "rec_label_smoothing": cfg.MODEL.REC.LABEL_SMOOTHING,
+            "rec_loss_weight": cfg.MODEL.REC.LOSS_WEIGHT,
+            "rec_timestep": cfg.MODEL.REC.TIMESTEP,
+            "rec_noise_seed": cfg.MODEL.REC.NOISE_SEED,
+            "rec_weight_by_objectness": cfg.MODEL.REC.WEIGHT_BY_OBJECTNESS,
+            "rec_holdout_classes": list(cfg.MODEL.REC.HOLDOUT_CLASSES),
+            "text_cache_path": cfg.MODEL.TEXT_CACHE.PATH,
         }
     
     def embed_condition(self, prompts, with_chi_window=False):
-        max_length = 506 if with_chi_window else 300
-        caption_token = self.tokenizer(
-            prompts, max_length=max_length, padding="max_length", truncation=True, return_tensors="pt"
-        ).to(local_config.device)
-        select_index = [0] + list(range(-300 + 1, 0)) if with_chi_window else list(range(300))
-        caption_embs_list = [self.text_encoder(caption_token.input_ids[[i]], caption_token.attention_mask[[i]])[0][:, None][
-            :, :, select_index
-        ] for i in range(caption_token.input_ids.shape[0])]
-        caption_embs = torch.cat(caption_embs_list, dim=0)
-        tokens_count = caption_token.attention_mask.sum(dim=-1)
-        emb_masks = caption_token.attention_mask[:, select_index]
-        return caption_embs, emb_masks, tokens_count
+        """Only during __init__, while the text encoder is loaded."""
+        if getattr(self, "text_encoder", None) is None:
+            raise RuntimeError("embed_condition needs the text encoder (not loaded with MODEL.TEXT_CACHE.PATH).")
+        return embed_prompts(self.tokenizer, self.text_encoder, prompts, local_config.device, with_chi_window)
     
     def run_diffusion_model(self, image, segment_data, timestep=None):
         """One forward pass of the frozen PixelDiT on `image` at flow time `timestep`
@@ -822,8 +928,66 @@ class SAN(nn.Module):
         with torch.autocast(
             "cuda", dtype=self.amp_dtype or torch.float32, enabled=self.amp_dtype is not None
         ):
-            mask_logits, mask_preds, concept_out = self._call_model(image_tensor, dataset_name)
-        return [x.float() for x in mask_logits], [x.float() for x in mask_preds], concept_out
+            mask_logits, mask_preds, concept_out, rec_logits = self._call_model(image_tensor, dataset_name)
+        return [x.float() for x in mask_logits], [x.float() for x in mask_preds], concept_out, rec_logits
+
+    # -------------------------------------------------------------- MODEL.REC
+    def _rec_vocab(self, dataset_name):
+        """Classes MODEL.REC scores: during training without the held-out
+        classes, (keep indices or None, class id -> new id or None)."""
+        if self.training:
+            return self.concept_train_vocab.get(dataset_name, (None, None))
+        return None, None
+
+    def _rec_inputs(self, dataset_name, keep=None):
+        """segment_data entries that make a backbone pass keep the state of the
+        recognition blocks (concept tokens run up to the deepest of them)."""
+        if dataset_name not in self.concept_embs:
+            raise KeyError(f"No concept embeddings for '{dataset_name}'.")
+        sel, _, _ = self._concept_variants(dataset_name, keep)
+        concepts = self.concept_embs[dataset_name]
+        return {
+            "concepts": concepts if sel is None else concepts[sel],
+            "concept_layers": self.rec_layers,
+            "concept_position": self.concept_position,
+            "rec_layers": self.rec_layers,
+        }
+
+    def _rec_logits(self, rec_state, attn_biases, mask_preds, dataset_name, keep=None):
+        """(B, Q, K) class logits of the predicted masks (synonyms reduced)."""
+        if attn_biases is None:
+            raise RuntimeError("MODEL.REC needs the side adapter's attention biases.")
+        logits = self.rec_head(self.model.core.patch_blocks, rec_state, attn_biases, mask_preds)
+        _, variant_class, num_classes = self._concept_variants(dataset_name, keep)
+        return reduce_synonyms(logits, variant_class, num_classes, self.concept_synonym_reduce)
+
+    def rec_loss(self, rec_logits, gt_instances, indices, dataset_name):
+        """Cross-entropy of MODEL.REC on the predicted masks the Hungarian matcher
+        assigned to ground-truth segments (held-out classes skipped)."""
+        _, remap = self._rec_vocab(dataset_name)
+        logits, targets = [], []
+        for i, (src, tgt) in enumerate(indices):
+            classes = gt_instances[i].gt_classes[tgt.to(local_config.device)]
+            src = src.to(local_config.device)
+            if remap is not None:
+                classes = remap[classes]
+                src, classes = src[classes >= 0], classes[classes >= 0]
+            if classes.numel():
+                logits.append(rec_logits[i, src])
+                targets.append(classes)
+        if not logits:
+            return {"loss_rec_cls": rec_logits.sum() * 0.0}
+        logits, targets = torch.cat(logits).float(), torch.cat(targets)
+        loss = F.cross_entropy(logits, targets, label_smoothing=self.rec_label_smoothing)
+        try:
+            from detectron2.utils.events import get_event_storage
+
+            storage = get_event_storage()
+            storage.put_scalar("rec_cls_acc", (logits.argmax(-1) == targets).float().mean().item())
+            storage.put_scalar("rec_logit_scale", self.rec_head.logit_scale.exp().item())
+        except AssertionError:
+            pass  # no event storage outside a trainer
+        return {"loss_rec_cls": self.rec_loss_weight * loss}
 
     def _call_model(self, image_tensor, dataset_name):
         """Run the frozen backbone and the side adapter.
@@ -837,6 +1001,8 @@ class SAN(nn.Module):
         and, at inference with MODEL.CONCEPT.ENABLED, a dict (None otherwise):
           "scores": {layer: (B, h*w, C)} image-token / class-concept similarities
           "hw":     (h, w) PixelDiT patch grid
+        and, with MODEL.REC.ENABLED, (B, Q, K) class logits of the final masks
+        (None otherwise).
         """
         segment_data = {"feature_layers": self.feature_layers}
         use_concepts = self.concept_enabled and not self.training
@@ -857,6 +1023,11 @@ class SAN(nn.Module):
         )
         if share_pass:
             segment_data.update(self._concept_inputs(dataset_name))
+        rec_keep, _ = self._rec_vocab(dataset_name) if self.rec_enabled else (None, None)
+        rec_share = self.rec_enabled and self.rec_timestep < 0
+        if rec_share:
+            # Recognition reads the same pass (image stream untouched by concepts).
+            segment_data.update(self._rec_inputs(dataset_name, rec_keep))
         self._run_backbone(noisy_image, segment_data, timestep=t_mask if t_mask > 0 else None)
 
         for k, v in segment_data["features"].items():
@@ -875,7 +1046,23 @@ class SAN(nn.Module):
             for k, v in segment_data["features"].items()
         }
         side_input = noisy_image if self.noise_side_adapter_input else image_tensor
-        mask_preds, mask_logits = self.side_adapter_network(side_input, backbone_features)
+        mask_preds, mask_logits, attn_biases = self.side_adapter_network(side_input, backbone_features)
+        rec_logits = None
+        if self.rec_enabled:
+            if rec_share:
+                rec_state = segment_data
+            else:
+                t = self.rec_timestep
+                # Own no-grad pass; no image features tapped for the side adapter.
+                rec_state = {"feature_layers": [], **self._rec_inputs(dataset_name, rec_keep)}
+                self._run_backbone(
+                    self._noise_image(image_tensor, t, self.rec_noise_seed, self.training),
+                    rec_state,
+                    timestep=t if t > 0 else None,
+                )
+            rec_logits = self._rec_logits(
+                rec_state, attn_biases[-1], mask_preds[-1], dataset_name, rec_keep
+            )
         concept_out = None
         if share_pass:
             concept_out = {
@@ -884,7 +1071,7 @@ class SAN(nn.Module):
             }
         elif use_concepts:
             concept_out = self.concept_pass(image_tensor, dataset_name)
-        return mask_logits, mask_preds, concept_out
+        return mask_logits, mask_preds, concept_out, rec_logits
 
     def forward(self, batched_inputs):
         images = [x["image"].to(local_config.device).float() / 255.0 for x in batched_inputs]
@@ -901,7 +1088,7 @@ class SAN(nn.Module):
             return self.gt_mask_inference(batched_inputs, images, dataset_name)
         if self.concept_lora and self.training and not self.concept_joint:
             return self.concept_train_forward(batched_inputs, images, dataset_name)
-        mask_logits, mask_preds, concept_out = self.call_model(images_tensor, dataset_name)
+        mask_logits, mask_preds, concept_out, rec_logits = self.call_model(images_tensor, dataset_name)
         if self.training:
             if "instances" in batched_inputs[0]:
                 gt_instances = [x["instances"].to(local_config.device) for x in batched_inputs]
@@ -933,6 +1120,11 @@ class SAN(nn.Module):
                 else:
                     # remove this loss if not specified in `weight_dict`
                     losses.pop(k)
+            if self.rec_enabled and targets is not None:
+                # Classes of the predicted masks matched to GT segments (SAN).
+                losses.update(
+                    self.rec_loss(rec_logits, gt_instances, self.criterion.last_indices, dataset_name)
+                )
             if self.concept_joint_gt:
                 # Classifier on the GT segments (as in "gt_masks"), side adapter on
                 # its usual mask / objectness losses, in the same step.
@@ -996,6 +1188,14 @@ class SAN(nn.Module):
                     )
                     continue
 
+                if rec_logits is not None:
+                    # Open-vocabulary class probabilities from the mask tokens.
+                    cls_probs = rec_logits[i].float().softmax(-1)
+                    if self.rec_weight_by_objectness:
+                        objectness = F.softmax(mask_cls_result.float(), dim=-1)[:, :-1].sum(-1)
+                        cls_probs = cls_probs * objectness[:, None]
+                    mask_cls_result = cls_probs
+
                 if concept_cls is not None:
                     # Replace the (object / no object) scores with open-vocabulary
                     # class probabilities from concept attention.
@@ -1043,7 +1243,7 @@ class SAN(nn.Module):
                 r = retry_if_cuda_oom(self.semantic_inference)(
                     mask_cls_result,
                     mask_pred_result,
-                    cls_are_probs=self.oracle_classes or concept_cls is not None,
+                    cls_are_probs=self.oracle_classes or concept_cls is not None or rec_logits is not None,
                 )
                 if not self.sem_seg_postprocess_before_inference:
                     r = retry_if_cuda_oom(sem_seg_postprocess)(

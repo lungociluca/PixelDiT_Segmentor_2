@@ -411,6 +411,22 @@ class PixDiT_T2I(nn.Module):
             concept_scores = {}
             concept_adapter = segment_data.get("concept_adapter")
             concept_cosine = bool(segment_data.get("concept_cosine", False))
+        # SAN-style recognition (san.model.rec_head): for every block k in
+        # segment_data["rec_layers"] (1-based) keep what is needed to re-run block
+        # k's image-stream attention on extra mask tokens after this pass:
+        #   segment_data["rec_inputs"][k]   (B, Hs*Ws, hidden) image tokens entering block k
+        #   segment_data["rec_concepts"][k] (B, K, hidden) block k's attention output of
+        #                                   the concept tokens (needs concepts up to k)
+        #   segment_data["rec_condition"]   (B, 1, hidden) the adaLN condition
+        rec_layers = set()
+        if segment_data is not None and segment_data.get("rec_layers"):
+            rec_layers = set(int(k) for k in segment_data["rec_layers"])
+            if concept_layers is None or not 1 <= min(rec_layers) <= max(rec_layers) <= concept_layers[-1]:
+                raise ValueError(
+                    f"rec_layers {sorted(rec_layers)} need concept tokens run up to their deepest "
+                    f"block (concept_layers {concept_layers})"
+                )
+            rec_inputs, rec_concepts = {}, {}
         # Optional low-rank update of the image stream (concept-scoring pass only).
         image_adapter = segment_data.get("image_adapter") if segment_data is not None else None
         # Recompute block activations in backward when gradients flow through the
@@ -469,12 +485,16 @@ class PixDiT_T2I(nn.Module):
                 features[0] = s0
 
             for i in range(num_blocks):
+                if (i + 1) in rec_layers:
+                    rec_inputs[i + 1] = s
                 if c_emb is not None and i < concept_layers[-1]:
                     s, y_emb, c_emb, attn_x, attn_c = run_block(
                         i, s, y_emb, condition, pos, pos_txt, attn_mask_joint,
                         concept=c_emb, pos_concept=pos_c, concept_adapter=concept_adapter,
                         image_adapter=image_adapter,
                     )
+                    if (i + 1) in rec_layers:
+                        rec_concepts[i + 1] = attn_c
                     if (i + 1) in concept_layers:
                         # fp32: a hidden_size-term dot product of unnormalised vectors.
                         with torch.autocast(x.device.type, enabled=False):
@@ -501,4 +521,8 @@ class PixDiT_T2I(nn.Module):
                 segment_data["patch_features"] = torch.stack(patch_features, dim=1)
             if concept_layers is not None:
                 segment_data["concept_scores"] = concept_scores
+            if rec_layers:
+                segment_data["rec_inputs"] = rec_inputs
+                segment_data["rec_concepts"] = rec_concepts
+                segment_data["rec_condition"] = condition
         return x

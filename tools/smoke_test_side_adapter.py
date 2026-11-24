@@ -15,7 +15,11 @@ It checks:
      into it and the learned head);
   5. the image LoRA starts as a no-op, trains through the image stream (with
      and without gradient checkpointing, same gradients), and the mask-embedding
-     head + ensemble give per-mask class probabilities with gradients.
+     head + ensemble give per-mask class probabilities with gradients;
+  6. MODEL.REC: the backbone keeps the recognition-block state without changing
+     the image features, the side adapter's bias branch has the right shapes,
+     the bias steers the mask tokens' attention, and the class loss reaches the
+     bias branch (and only trainable parts).
 """
 import os
 import sys
@@ -31,6 +35,7 @@ import t2i.config as local_config
 from san.config import add_san_config
 from san.model.concept_classifier import ConceptLoRA, ConceptMaskClassifier, MaskEmbedHead, ensemble_probs
 from san.model.criterion import SetCriterion
+from san.model.rec_head import AttnBiasMaskRecognizer
 from san.model.matcher import HungarianMatcher
 from san.model.side_adapter import build_side_adapter_network
 from san.utils.amp import resolve_amp_dtype
@@ -92,7 +97,8 @@ def check_side_adapter():
     use_amp = device == "cuda"
     amp_dtype = resolve_amp_dtype(cfg) if use_amp else None  # fp16 on pre-Ampere GPUs
     with torch.autocast(device, dtype=amp_dtype, enabled=use_amp):
-        mask_preds, logits = net(image, feats)
+        mask_preds, logits, biases = net(image, feats)
+    assert all(b is None for b in biases), "no bias branch without MODEL.REC"
     n_ds = len(cfg.MODEL.SIDE_ADAPTER.DEEP_SUPERVISION_IDXS)
     Q = cfg.MODEL.SIDE_ADAPTER.NUM_QUERIES
     assert len(mask_preds) == len(logits) == n_ds
@@ -140,7 +146,7 @@ def check_side_adapter():
 
     net.eval()
     with torch.no_grad():
-        mask_preds, logits = net(image, feats)
+        mask_preds, logits, _ = net(image, feats)
     assert len(mask_preds) == len(logits) == 1
     print("eval: ok")
 
@@ -391,10 +397,92 @@ def seg_features(core, x, t, y, base, img):
     return seg["features"]
 
 
+def check_rec():
+    # Backbone hook: recognition state of blocks 2 and 3.
+    local_config.layer_count = 3
+    core = PixDiT_T2I(
+        hidden_size=96, num_groups=4, patch_depth=14, txt_embed_dim=32, txt_max_length=8
+    ).to(device).eval().requires_grad_(False)  # frozen, as in SAN.__init__
+    B, K, Q, hw = 2, 5, 7, (8, 6)
+    P = hw[0] * hw[1]
+    x = torch.randn(B, 3, 128, 96, device=device)
+    t = torch.full((B,), 2.0, device=device)
+    y = torch.randn(1, 8, 32, device=device)
+    concepts = torch.randn(K, 32, device=device)
+    plain = {"feature_layers": [1, 2, 3]}
+    seg = {
+        "feature_layers": [1, 2, 3],
+        "concepts": concepts,
+        "concept_layers": [2, 3],
+        "concept_position": 2,
+        "rec_layers": [2, 3],
+    }
+    with torch.no_grad():
+        core(x, t, y, segment_data=plain)
+        core(x, t, y, segment_data=seg)
+    for k in [1, 2, 3]:
+        assert torch.equal(plain["features"][k], seg["features"][k]), f"layer {k} changed"
+    assert sorted(seg["rec_inputs"]) == [2, 3] and sorted(seg["rec_concepts"]) == [2, 3]
+    assert torch.equal(seg["rec_inputs"][2], plain["features"][1])
+    assert torch.equal(seg["rec_inputs"][3], plain["features"][2])
+    assert seg["rec_concepts"][3].shape == (B, K, 96)
+    try:
+        core(x, t, y, segment_data=dict(seg, concept_layers=[2]))
+        raise AssertionError("rec layer deeper than the concept layers must be rejected")
+    except ValueError:
+        pass
+
+    head = AttnBiasMaskRecognizer([3], query_init="global", self_attn=False).to(device)
+    masks = torch.randn(B, Q, *hw, device=device)
+    # A huge bias on one patch: the token's attention output is that patch's value.
+    bias = torch.zeros(B, 1, Q, *hw, device=device)
+    bias[:, :, :, 3, 2] = 1e4
+    blk = core.patch_blocks[2]
+    out, _ = head._block(blk, seg["rec_condition"], seg["rec_inputs"][3],
+                         head.init_tokens(seg["rec_inputs"][3], masks, hw),
+                         head._bias_to_grid(bias, hw), last=True)
+    with torch.no_grad():
+        sh, sc = blk.adaLN_modulation_img(seg["rec_condition"]).chunk(6, dim=-1)[:2]
+        xn = blk.norm_x1(seg["rec_inputs"][3]) * (1 + sc) + sh
+        v = blk.attn.qkv_x(xn).reshape(B, P, 3, 4, 24)[:, 3 * hw[1] + 2, 2].reshape(B, 96)
+        ref = blk.attn.proj_x(v)
+    assert torch.allclose(out, ref[:, None].expand_as(out), atol=1e-4), (out - ref[:, None]).abs().max()
+
+    # Side adapter with the bias branch, and the class loss back to it.
+    cfg = get_cfg()
+    add_deeplab_config(cfg)
+    add_san_config(cfg)
+    cfg.merge_from_file("configs/san_pixeldit_rec_attn_bias.yaml")
+    cfg.MODEL.SIDE_ADAPTER.NUM_QUERIES = Q
+    cfg.MODEL.SIDE_ADAPTER.ATTN_BIAS.NUM_HEADS = 4
+    cfg.MODEL.REC.LAYERS = [2, 3]
+    layers = list(cfg.MODEL.PIXELDIT.FEATURE_LAYERS)
+    net = build_side_adapter_network(cfg, {k: ShapeSpec(channels=96) for k in layers}).to(device).train()
+    image = torch.randn(B, 3, 128, 96, device=device)
+    feats = {k: torch.randn(B, 96, *hw, device=device) for k in layers}
+    mask_preds, logits, biases = net(image, feats)
+    assert all(b is None for b in biases[:-1]), "deep-supervision outputs carry no bias"
+    assert len(biases[-1]) == 2 and all(b.shape == (B, 4, Q, *hw) for b in biases[-1])
+    head = AttnBiasMaskRecognizer([2, 3], query_init="masked").to(device).train()
+    rec = head(core.patch_blocks, seg, biases[-1], mask_preds[-1])
+    assert rec.shape == (B, Q, K) and torch.isfinite(rec).all(), rec.shape
+    torch.nn.functional.cross_entropy(rec.flatten(0, 1), torch.randint(0, K, (B * Q,), device=device)).backward()
+    for name in ["mask_decoder.attn_mlp", "mask_decoder.query_mlp", "vit_model.blocks.0"]:
+        grads = [p.grad for n, p in net.named_parameters() if n.startswith(name)]
+        assert grads and all(g is not None and torch.isfinite(g).all() for g in grads), name
+    assert head.logit_scale.grad is not None
+    # QUERY_INIT "masked" uses detached masks: no class gradient through pix_mlp.
+    assert all(p.grad is None or p.grad.abs().sum() == 0
+               for n, p in net.named_parameters() if n.startswith("mask_decoder.pix_mlp"))
+    assert all(p.grad is None for p in core.parameters()), "frozen backbone got gradients"
+    print("MODEL.REC: ok")
+
+
 if __name__ == "__main__":
     check_feature_hook()
     check_concept_stream()
     check_concept_lora()
     check_image_lora_and_mask_head()
     check_side_adapter()
+    check_rec()
     print("all checks passed")

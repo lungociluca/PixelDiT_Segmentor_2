@@ -220,6 +220,57 @@ def add_san_config(cfg):
     # the segmentation, to measure the concept scores on their own.
     cfg.MODEL.CONCEPT.PIXEL_BASELINE = False
 
+    # SAN-style mask classification inside the frozen PixelDiT (san/model/rec_head.py).
+    # One mask token per side-adapter query runs through PixelDiT block(s) LAYERS
+    # with the block's frozen image-stream weights, attending to the block's input
+    # image tokens with an attention bias predicted by the side adapter (SAN's
+    # attention-bias branch, MODEL.SIDE_ADAPTER.ATTN_BIAS: NUM_HEADS = PixelDiT
+    # heads (24) or 1, NUM_LAYERS is set from LAYERS). Its attention output is
+    # compared (cosine) with the attention output of the class-name concept tokens
+    # in the same block (text side: MODEL.CONCEPT.TEMPLATE(S) / CLEAN_NAMES /
+    # SPLIT_SYNONYMS / SYNONYM_REDUCE / POOL / INSTRUCTION_CONTEXT). Trained on the
+    # side adapter's *predicted* masks: cross-entropy over the training vocabulary
+    # for every query the Hungarian matcher assigns to a ground-truth segment; the
+    # loss trains the bias branch and, through it, the side adapter. No GT masks
+    # are used for classification, no CLIP, no per-class parameters. At inference
+    # a mask's class probabilities are softmax(logits) x its objectness. Needs
+    # MODEL.SAN.CLASS_AGNOSTIC; exclusive with CONCEPT.ENABLED / ORACLE_CLASSES.
+    cfg.MODEL.REC = CN()
+    cfg.MODEL.REC.ENABLED = False
+    # Consecutive PixelDiT blocks (1-based) the mask tokens run through; they are
+    # scored in the last one. Blocks built = max(FEATURE_LAYERS, LAYERS).
+    cfg.MODEL.REC.LAYERS = [5]
+    # "global": every mask token starts as the mean image token entering the first
+    # block (like SAN's [CLS] copies). "masked": as the image tokens averaged over
+    # its predicted mask (detached).
+    cfg.MODEL.REC.QUERY_INIT = "global"
+    # Mask tokens also attend to themselves (as SAN's [SOS] tokens).
+    cfg.MODEL.REC.SELF_ATTN = True
+    cfg.MODEL.REC.INIT_LOGIT_SCALE = 20.0
+    cfg.MODEL.REC.LABEL_SMOOTHING = 0.0
+    cfg.MODEL.REC.LOSS_WEIGHT = 2.0
+    # Flow time of the input PixelDiT sees for recognition. < 0: share the side
+    # adapter's backbone pass (MODEL.PIXELDIT.TIMESTEP, no extra cost). >= 0: a
+    # second no-grad pass on (1 - t) * image + t * noise (NOISE_SEED at eval).
+    cfg.MODEL.REC.TIMESTEP = -1.0
+    cfg.MODEL.REC.NOISE_SEED = 0
+    # Scale each mask's class probabilities by its predicted objectness.
+    cfg.MODEL.REC.WEIGHT_BY_OBJECTNESS = True
+    # Class names left out of training (their segments get no class loss and
+    # their concepts are not in the training vocabulary), to test unseen classes.
+    cfg.MODEL.REC.HOLDOUT_CLASSES = []
+
+    # Precomputed text-encoder (Gemma) outputs: the default prompt and the
+    # class-name concepts of every dataset in DATASETS.TRAIN / TEST, made by
+    #   python tools/precompute_text_embeddings.py --config-file <cfg> MODEL.TEXT_CACHE.PATH <file>
+    # "" = load Gemma and compute them when the model is built. With a path,
+    # Gemma is not loaded; the file must have been made with the same text
+    # settings (text encoder, default prompt, MODEL.CONCEPT TEMPLATE(S) / POOL /
+    # CLEAN_NAMES / SPLIT_SYNONYMS / INSTRUCTION_CONTEXT, class names), else
+    # building the model fails and says what differs.
+    cfg.MODEL.TEXT_CACHE = CN()
+    cfg.MODEL.TEXT_CACHE.PATH = ""
+
     # PixelDiT backbone
     cfg.MODEL.PIXELDIT = CN()
     # PixelDiT layers whose image tokens are passed to the side adapter:
@@ -261,8 +312,9 @@ def add_san_config(cfg):
     cfg.MODEL.SIDE_ADAPTER.DEEP_SUPERVISION_IDXS = [7, 8]
 
     # Mask decoder MLPs. PixelDiTSideAdapterNetwork uses EMBED_CHANNELS,
-    # MLP_CHANNELS and MLP_NUM_LAYERS; NUM_HEADS, NUM_LAYERS and RESCALE_ATTN_BIAS
-    # only apply to SAN's CLIP attention-bias branch.
+    # MLP_CHANNELS and MLP_NUM_LAYERS; with MODEL.REC.ENABLED also NUM_HEADS (bias
+    # maps per query: 24 = one per PixelDiT head, or 1 = shared) and
+    # RESCALE_ATTN_BIAS (NUM_LAYERS is then taken from MODEL.REC.LAYERS).
     cfg.MODEL.SIDE_ADAPTER.ATTN_BIAS = CN()
     cfg.MODEL.SIDE_ADAPTER.ATTN_BIAS.NUM_HEADS = 12
     cfg.MODEL.SIDE_ADAPTER.ATTN_BIAS.NUM_LAYERS = 1

@@ -1,0 +1,81 @@
+# SAN-style mask classification on PixelDiT with a learned attention bias (MODEL.REC).
+#
+# Masks: side adapter fed PixelDiT blocks 1, 3, 5 (class-agnostic masks + objectness,
+# as in the 5-block joint runs).
+# Classes: one mask token per query runs through PixelDiT block 5 with the frozen
+# image-stream weights, attending to block 5's input image tokens with a per-query,
+# per-head (24) attention bias from the side adapter's bias branch. Its block-5
+# attention output is scored (cosine) against the block-5 attention output of the
+# class-name concept tokens. Trained on the side adapter's *predicted* masks matched
+# to GT segments (no GT masks for classification, no CLIP, no projection head).
+# Blocks built = max(FEATURE_LAYERS, REC.LAYERS) = 5.
+#
+# train (side adapter from scratch):
+#   python train_net.py --config-file configs/san_pixeldit_rec_attn_bias.yaml --num-gpus 1 OUTPUT_DIR output_rec
+# or warm-start the mask path from a trained 5-block side adapter (the bias branch
+# and logit scale are new and start from their init; "missing keys" is expected):
+#   ... MODEL.WEIGHTS output_5blocks_joint_135/model_final.pth OUTPUT_DIR output_rec
+# Gemma outputs precomputed once (then add the same MODEL.TEXT_CACHE.PATH to the
+# train / eval commands; Gemma is not loaded):
+#   python tools/precompute_text_embeddings.py --config-file configs/san_pixeldit_rec_attn_bias.yaml \
+#     MODEL.TEXT_CACHE.PATH text_cache/rec_attn_bias.pt
+# eval:
+#   python train_net.py --config-file configs/san_pixeldit_rec_attn_bias.yaml --num-gpus 1 \
+#     --eval-only MODEL.WEIGHTS output_rec/model_final.pth OUTPUT_DIR output_rec_eval
+# ablations (no code change):
+#   MODEL.REC.TIMESTEP 0.4            recognition on a 40%-noise pass (as the concept runs)
+#   MODEL.REC.QUERY_INIT masked       mask tokens start from the mask-pooled image tokens
+#   MODEL.REC.LAYERS "[4, 5]" MODEL.PIXELDIT.FEATURE_LAYERS "[1, 3, 5]"   two blocks, as SAN uses several
+#   MODEL.SIDE_ADAPTER.ATTN_BIAS.NUM_HEADS 1                              one shared bias map (less memory)
+#   MODEL.REC.HOLDOUT_CLASSES '["dog", "bus", "couch"]'                   unseen-class check on COCO
+_BASE_: san_clip_vit_res4_coco.yaml
+MODEL:
+  SAN:
+    CLASS_AGNOSTIC: True           # side adapter keeps object / no-object; classes come from MODEL.REC
+    ORACLE_CLASSES:
+      ENABLED: False
+  PIXELDIT:
+    FEATURE_LAYERS: [1, 3, 5]
+    TIMESTEP: 0.0                  # clean image for the side adapter (and, shared, for recognition)
+  SIDE_ADAPTER:
+    FUSION_MAP: ["1->0", "3->1", "5->2"]
+    ATTN_BIAS:
+      NUM_HEADS: 24                # one bias map per PixelDiT head
+      EMBED_CHANNELS: 256
+      MLP_CHANNELS: 256
+      MLP_NUM_LAYERS: 3
+      RESCALE_ATTN_BIAS: True
+  CONCEPT:
+    ENABLED: False                 # only the text settings below are used, by MODEL.REC
+    CLEAN_NAMES: True
+    SPLIT_SYNONYMS: True
+    SYNONYM_REDUCE: "max"
+    INSTRUCTION_CONTEXT: False
+    POOL: "mean"
+    TEMPLATES:
+      - "A picture of a {target}"
+      - "A photo of a {target}."
+      - "A photo of the {target}."
+      - "An image showing a {target}."
+      - "A close-up photo of a {target}."
+      - "A photo of a small {target}."
+      - "A photo of a large {target}."
+      - "There is a {target} in the scene."
+  REC:
+    ENABLED: True
+    LAYERS: [5]
+    QUERY_INIT: "global"
+    SELF_ATTN: True
+    INIT_LOGIT_SCALE: 20.0
+    LABEL_SMOOTHING: 0.0
+    LOSS_WEIGHT: 2.0
+    TIMESTEP: -1.0                 # share the side adapter's pass
+    WEIGHT_BY_OBJECTNESS: True
+SOLVER:
+  # The bias branch and the (B, 24, 100, 4096) recognition attention add memory:
+  # smaller micro-batches, same 32 images per optimizer step as 16 x 2.
+  IMS_PER_BATCH: 8
+  GRAD_ACCUM_STEPS: 4
+  MAX_ITER: 3000
+TEST:
+  EVAL_PERIOD: 1000
