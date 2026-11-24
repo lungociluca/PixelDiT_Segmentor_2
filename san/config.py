@@ -220,6 +220,37 @@ def add_san_config(cfg):
     # the segmentation, to measure the concept scores on their own.
     cfg.MODEL.CONCEPT.PIXEL_BASELINE = False
 
+    # SAN-style open-vocabulary mask classification with a frozen CLIP text
+    # encoder (san/model/region_classifier.py). Every mask query gets a region
+    # token that runs through PixelDiT block LAYER, attending to that block's
+    # input image tokens with an attention bias predicted by the side adapter
+    # (SAN's attention-bias branch). Its output is projected into the CLIP text
+    # space and scored against the class names. Trained end-to-end with the
+    # Mask2Former criterion on the matched *predicted* masks (needs
+    # MODEL.SAN.CLASS_AGNOSTIC False; NUM_CLASSES = training vocabulary size).
+    # CLIP is only used once at construction to embed the vocabularies.
+    cfg.MODEL.REGION_CLS = CN()
+    cfg.MODEL.REGION_CLS.ENABLED = False
+    # PixelDiT block (1-based) the region tokens run through.
+    cfg.MODEL.REGION_CLS.LAYER = 5
+    cfg.MODEL.REGION_CLS.CLIP_MODEL = "ViT-B-16"
+    cfg.MODEL.REGION_CLS.CLIP_PRETRAINED = "openai"
+    cfg.MODEL.REGION_CLS.TEMPLATE_SET = "vild"
+    cfg.MODEL.REGION_CLS.CLEAN_NAMES = True
+    cfg.MODEL.REGION_CLS.SPLIT_SYNONYMS = True
+    cfg.MODEL.REGION_CLS.SYNONYM_REDUCE = "max"
+    # Attention-bias maps per query: one per PixelDiT head (24) or 1 (shared).
+    cfg.MODEL.REGION_CLS.BIAS_HEADS = 24
+    # Width of the query / pixel embeddings the bias is the dot product of.
+    cfg.MODEL.REGION_CLS.BIAS_CHANNELS = 64
+    cfg.MODEL.REGION_CLS.PROJ_HIDDEN_DIM = 1024
+    cfg.MODEL.REGION_CLS.DROPOUT = 0.0
+    cfg.MODEL.REGION_CLS.INIT_LOGIT_SCALE = 50.0
+    # Inference, with MODEL.CONCEPT.ENABLED as well: geometric ensemble
+    # p ~ p_region^(1 - a) * p_concept^a over the classes, then x objectness
+    # (1 - P(no object) of the region classifier). 0 = region classifier only.
+    cfg.MODEL.REGION_CLS.CONCEPT_ALPHA = 0.0
+
     # PixelDiT backbone
     cfg.MODEL.PIXELDIT = CN()
     # PixelDiT layers whose image tokens are passed to the side adapter:

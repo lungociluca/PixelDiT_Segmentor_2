@@ -149,6 +149,42 @@ class MMDiTJointAttention(nn.Module):
         out_c = self.proj_drop_y(proj_c)
         return out_x, out_y, out_c
 
+    def region_attention(self, x: torch.Tensor, r: torch.Tensor, attn_bias: torch.Tensor) -> torch.Tensor:
+        """SAN-style readout: region tokens r (B, Q, C) attend to the image tokens x
+        (B, Nx, C) and to themselves, through the frozen image-stream weights, with
+        an additive bias on the image logits. One-way: nothing attends to r, so
+        the image and text streams are unchanged (like the [SOS] tokens of SAN).
+
+        attn_bias: (B, H or 1, Q, Nx), added to the scaled dot products.
+        Image keys get no RoPE: the region tokens have no position, and the bias
+        carries all the spatial information. Returns (B, Q, C) after proj_x.
+        """
+        B, Nx, C = x.shape
+        Q = r.shape[1]
+        H = self.num_heads
+        d = C // H
+        # Image keys / values: frozen weights, frozen features, no graph needed.
+        with torch.no_grad():
+            kv = self.qkv_x(x).reshape(B, Nx, 3, H, d)
+            kx = self.k_norm_x(kv[:, :, 1])
+            vx = kv[:, :, 2]
+        qkv_r = self.qkv_x(r).reshape(B, Q, 3, H, d)
+        qr = self.q_norm_x(qkv_r[:, :, 0])
+        kr = self.k_norm_x(qkv_r[:, :, 1])
+        vr = qkv_r[:, :, 2]
+        # fp32 logits / softmax: the bias is learned and unbounded.
+        with torch.autocast(x.device.type, enabled=False):
+            qr, kr, vr = qr.float(), kr.float(), vr.float()
+            scale = d ** -0.5
+            logits_img = torch.einsum("bqhd,bnhd->bhqn", qr, kx.float()) * scale
+            logits_img = logits_img + attn_bias.float()
+            logits_self = (qr * kr).sum(-1).transpose(1, 2)[..., None] * scale  # (B, H, Q, 1)
+            attn = torch.cat([logits_img, logits_self], dim=-1).softmax(dim=-1)
+            out = torch.einsum("bhqn,bnhd->bqhd", attn[..., :Nx], vx.float())
+            out = out + attn[..., Nx:].permute(0, 2, 1, 3) * vr  # (B, Q, H, d)
+        out = out.reshape(B, Q, C).to(r.dtype)
+        return self.proj_drop_x(self.proj_x(out))
+
 class MMDiTBlockT2I(nn.Module):
     def __init__(self, hidden_size, groups, mlp_ratio=4.0, adaLN_modulation_img=None, adaLN_modulation_txt=None, block_id=-1):
         super().__init__()
@@ -206,6 +242,19 @@ class MMDiTBlockT2I(nn.Module):
         concept = concept + gate_msa_y * attn_c
         concept = concept + gate_mlp_y * self.mlp_y(apply_adaln(self.norm_y2(concept), shift_mlp_y, scale_mlp_y))
         return x, y, concept, attn_x, attn_c
+
+    def forward_region(self, x, r, c, attn_bias):
+        """Run region tokens r (B, Q, C) through this block's image stream, reading
+        the block's input image tokens x (B, Nx, C) with `attn_bias` (see
+        MMDiTJointAttention.region_attention). c: the timestep condition the
+        backbone pass used. Returns the updated region tokens = this block's
+        output features of the regions."""
+        shift_msa_x, scale_msa_x, gate_msa_x, shift_mlp_x, scale_mlp_x, gate_mlp_x = self.adaLN_modulation_img(c).chunk(6, dim=-1)
+        x_norm = apply_adaln(self.norm_x1(x), shift_msa_x, scale_msa_x)
+        r_norm = apply_adaln(self.norm_x1(r), shift_msa_x, scale_msa_x)
+        r = r + gate_msa_x * self.attn.region_attention(x_norm, r_norm, attn_bias)
+        r = r + gate_mlp_x * self.mlp_x(apply_adaln(self.norm_x2(r), shift_mlp_x, scale_mlp_x))
+        return r
 
 class PixDiT_T2I(nn.Module):
     def __init__(
@@ -434,6 +483,9 @@ class PixDiT_T2I(nn.Module):
             # outputs of all run blocks are stacked in segment_data["patch_features"]
             # as (B, layers, Hs*Ws, hidden), as before.
             segment_data["hw"] = (Hs, Ws)
+            # Timestep condition of this pass, for re-running a block on extra
+            # one-way tokens afterwards (MMDiTBlockT2I.forward_region).
+            segment_data["condition"] = condition
             tap_layers = segment_data.get("feature_layers")
             if tap_layers is not None:
                 tap_layers = sorted(set(int(k) for k in tap_layers))

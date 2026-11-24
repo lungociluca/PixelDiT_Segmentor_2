@@ -6,7 +6,7 @@ removed: there is no CLIP recognition head to feed. Instead each query predicts
 a mask and a class-agnostic objectness score (object / no object).
 """
 from functools import partial
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 from detectron2.layers import ShapeSpec
@@ -19,36 +19,48 @@ from .timm_wrapper import PatchEmbed
 
 
 class MaskObjectnessDecoder(nn.Module):
-    """Query/pixel MLPs -> mask logits, plus a linear class head on the queries."""
+    """Query/pixel MLPs -> mask logits, plus either a linear class head on the
+    queries (objectness / closed-set classes) or, with `num_classes=None`, SAN's
+    attention-bias branch for the region classifier (san.model.region_classifier).
+
+    attn_bias_heads > 0: per query and per PixelDiT attention head, a bias map
+    over the patch grid, bias[b, n, q] = <bias_query[b, q], bias_pix[b, n]>,
+    as in SAN's MLPMaskDecoder (with its own, smaller embedding width).
+    """
 
     def __init__(
         self,
         *,
         in_channels: int,
-        num_classes: int = 1,
+        num_classes: Optional[int] = 1,
         embed_channels: int = 256,
         mlp_channels: int = 256,
         mlp_num_layers: int = 3,
+        attn_bias_heads: int = 0,
+        attn_bias_channels: int = 64,
     ):
         super().__init__()
         # Query branch (same as SAN's MLPMaskDecoder).
         self.query_mlp = MLP(in_channels, mlp_channels, embed_channels, mlp_num_layers)
         # Pixel branch: 1x1 convs on the dense side features.
-        self.pix_mlp = MLP(
-            in_channels,
-            mlp_channels,
-            embed_channels,
-            mlp_num_layers,
-            affine_func=partial(nn.Conv2d, kernel_size=1),
-        )
+        dense = partial(nn.Conv2d, kernel_size=1)
+        self.pix_mlp = MLP(in_channels, mlp_channels, embed_channels, mlp_num_layers, affine_func=dense)
         # num_classes + 1 logits, last one = no object (Mask2Former convention).
-        self.class_embed = nn.Linear(in_channels, num_classes + 1)
+        self.class_embed = nn.Linear(in_channels, num_classes + 1) if num_classes is not None else None
+        self.attn_bias_heads = int(attn_bias_heads)
+        self.attn_bias_channels = int(attn_bias_channels)
+        if self.attn_bias_heads > 0:
+            self.bias_query = nn.Linear(embed_channels, self.attn_bias_channels)
+            self.attn_mlp = MLP(
+                in_channels, mlp_channels, self.attn_bias_channels * self.attn_bias_heads,
+                mlp_num_layers, affine_func=dense,
+            )
 
-    def forward(
-        self, query: torch.Tensor, x: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, query: torch.Tensor, x: torch.Tensor):
         # query: [B,N,C]  x: [B,C,H,W]
-        class_logits = self.class_embed(query)  # [B,N,K+1]
+        # Returns (mask_preds [B,N,H,W], class_logits [B,N,K+1] or None,
+        #          attn_bias [B,heads,N,H,W] or None).
+        class_logits = self.class_embed(query) if self.class_embed is not None else None
         query_embed = self.query_mlp(query)
         pix_embed = self.pix_mlp(x)
         # Mask logits in fp32: an unnormalised 256-term dot product, which is where
@@ -57,7 +69,14 @@ class MaskObjectnessDecoder(nn.Module):
             mask_preds = torch.einsum(
                 "bqc,bchw->bqhw", query_embed.float(), pix_embed.float()
             )  # [B,N,H,W]
-        return mask_preds, class_logits
+        attn_bias = None
+        if self.attn_bias_heads > 0:
+            b, _, h, w = x.shape
+            bq = self.bias_query(query_embed)
+            attn = self.attn_mlp(x).reshape(b, self.attn_bias_heads, self.attn_bias_channels, h, w)
+            with torch.autocast(query.device.type, enabled=False):
+                attn_bias = torch.einsum("bqc,bnchw->bnqhw", bq.float(), attn.float())
+        return mask_preds, class_logits, attn_bias
 
 
 @SIDE_ADAPTER_REGISTRY.register()
@@ -71,7 +90,9 @@ class PixelDiTSideAdapterNetwork(RegionwiseSideAdapterNetwork):
     forward(image, features) returns two lists, one entry per deep-supervision
     block during training (only the last one at inference):
       mask_preds:   [B, N, h, w] mask logits on the side ViT's patch grid
-      class_logits: [B, N, K + 1] (K = 1 for class-agnostic training)
+      class_logits: [B, N, K + 1] (K = 1 for class-agnostic training), or with
+                    MODEL.REGION_CLS.ENABLED the attention biases
+                    [B, heads, N, h, w] for the region classifier
     """
 
     @classmethod
@@ -115,7 +136,12 @@ class PixelDiTSideAdapterNetwork(RegionwiseSideAdapterNetwork):
                 for tgt, src in x2side_map.items()
             }
         )
-        num_classes = 1 if cfg.MODEL.SAN.CLASS_AGNOSTIC else cfg.MODEL.SAN.NUM_CLASSES
+        region = cfg.MODEL.REGION_CLS.ENABLED
+        if region:
+            # Classes come from the region classifier; no closed-set class head.
+            num_classes = None
+        else:
+            num_classes = 1 if cfg.MODEL.SAN.CLASS_AGNOSTIC else cfg.MODEL.SAN.NUM_CLASSES
         return {
             "vit_model": vit,
             "num_queries": sa.NUM_QUERIES,
@@ -127,6 +153,8 @@ class PixelDiTSideAdapterNetwork(RegionwiseSideAdapterNetwork):
                 embed_channels=sa.ATTN_BIAS.EMBED_CHANNELS,
                 mlp_channels=sa.ATTN_BIAS.MLP_CHANNELS,
                 mlp_num_layers=sa.ATTN_BIAS.MLP_NUM_LAYERS,
+                attn_bias_heads=cfg.MODEL.REGION_CLS.BIAS_HEADS if region else 0,
+                attn_bias_channels=cfg.MODEL.REGION_CLS.BIAS_CHANNELS,
             ),
             "deep_supervision_idxs": sa.DEEP_SUPERVISION_IDXS,
         }
@@ -134,11 +162,14 @@ class PixelDiTSideAdapterNetwork(RegionwiseSideAdapterNetwork):
     def decode_masks(
         self, features: List[Dict[str, torch.Tensor]]
     ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+        """Returns (mask_preds, second), one entry per decoded block. `second` is
+        the class logits, or the attention biases [B, heads, N, h, w] when the
+        decoder has no class head (MODEL.REGION_CLS.ENABLED)."""
         if not self.training:
             features = [features[-1]]
-        mask_preds, class_logits = [], []
+        mask_preds, second = [], []
         for feature in features:
-            mask_pred, class_logit = self.mask_decoder(**feature)
+            mask_pred, class_logit, attn_bias = self.mask_decoder(**feature)
             mask_preds.append(mask_pred)
-            class_logits.append(class_logit)
-        return mask_preds, class_logits
+            second.append(class_logit if class_logit is not None else attn_bias)
+        return mask_preds, second

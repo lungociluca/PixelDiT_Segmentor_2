@@ -384,6 +384,96 @@ def check_image_lora_and_mask_head():
     print("image LoRA + mask head: ok")
 
 
+def check_region_classifier():
+    """SAN-style region classifier (MODEL.REGION_CLS): side adapter with the
+    attention-bias branch and no class head, region tokens through a frozen
+    PixelDiT block, CLIP-space logits (random text embeddings: no CLIP download),
+    Mask2Former criterion, gradients into the classifier and the side adapter."""
+    from san.model.region_classifier import RegionClassifier
+
+    local_config.layer_count = 2
+    hidden, heads, K, D = 96, 4, 5, 32
+    core = PixDiT_T2I(
+        hidden_size=hidden, num_groups=heads, patch_depth=14, txt_embed_dim=32, txt_max_length=8
+    ).to(device).eval()
+    core.requires_grad_(False)
+    B, H, W = 2, 128, 96
+    h, w = H // 16, W // 16
+    x = torch.randn(B, 3, H, W, device=device)
+    t = torch.full((B,), 0.4, device=device)
+    y = torch.randn(1, 8, 32, device=device)
+    seg = {"feature_layers": [1, 2]}
+    with torch.no_grad():
+        core(x, t, y, segment_data=seg)
+    assert "condition" in seg
+
+    cfg = get_cfg()
+    add_deeplab_config(cfg)
+    add_san_config(cfg)
+    cfg.merge_from_file("configs/san_pixeldit_region_clip.yaml")
+    cfg.MODEL.PIXELDIT.FEATURE_LAYERS = [1, 2]
+    cfg.MODEL.SIDE_ADAPTER.FUSION_MAP = ["1->0", "2->1"]
+    cfg.MODEL.REGION_CLS.BIAS_HEADS = heads
+    net = build_side_adapter_network(cfg, {k: ShapeSpec(channels=hidden) for k in [1, 2]}).to(device)
+    assert net.mask_decoder.class_embed is None
+    net.train()
+    feats = {k: v.transpose(1, 2).reshape(B, hidden, h, w) for k, v in seg["features"].items()}
+    mask_preds, biases = net(x, feats)
+    Q = cfg.MODEL.SIDE_ADAPTER.NUM_QUERIES
+    n_ds = len(cfg.MODEL.SIDE_ADAPTER.DEEP_SUPERVISION_IDXS)
+    assert len(biases) == len(mask_preds) == n_ds
+    assert biases[-1].shape == (B, heads, Q, h, w), biases[-1].shape
+
+    clf = RegionClassifier(hidden, D, proj_hidden_dim=64).to(device)
+    text = torch.nn.functional.normalize(torch.randn(K + 1, D, device=device), dim=-1)
+    variant_class = torch.tensor([0, 1, 2, 3, 4, 4], device=device)  # class 4 has a synonym
+    block = core.patch_blocks[1]
+    xin = seg["features"][1]  # input of block 2 = output of block 1
+    logits = []
+    for bias in biases:
+        r = block.forward_region(xin, clf.init_tokens(xin, Q), seg["condition"], bias.flatten(-2))
+        logits.append(clf.logits(r, text, variant_class, K))
+    assert logits[-1].shape == (B, Q, K + 1), logits[-1].shape
+
+    # The bias steers the readout: different biases, different region features.
+    r0 = block.forward_region(xin, clf.init_tokens(xin, 2), seg["condition"], torch.zeros(B, 1, 2, h * w, device=device))
+    b1 = torch.full((B, 1, 2, h * w), -1e4, device=device)
+    b1[:, :, 0, 0] = 0
+    b1[:, :, 1, -1] = 0
+    r1 = block.forward_region(xin, clf.init_tokens(xin, 2), seg["condition"], b1)
+    assert torch.allclose(r0[:, 0], r0[:, 1], atol=1e-5) and not torch.allclose(r1[:, 0], r1[:, 1], atol=1e-3)
+
+    matcher = HungarianMatcher(cost_class=2.0, cost_mask=5.0, cost_dice=5.0, num_points=256)
+    weight_dict = {"loss_ce": 2.0, "loss_mask": 5.0, "loss_dice": 5.0}
+    for i in range(n_ds - 1):
+        weight_dict.update({f"{k}_{i}": v for k, v in list(weight_dict.items())[:3]})
+    criterion = SetCriterion(
+        num_classes=K, matcher=matcher, weight_dict=weight_dict, eos_coef=0.1,
+        losses=["labels", "masks"], num_points=256, oversample_ratio=3.0,
+        importance_sample_ratio=0.75,
+    ).to(device)
+    targets = [
+        {"labels": torch.randint(0, K, (3,), device=device), "masks": torch.rand(3, H, W, device=device) > 0.5}
+        for _ in range(B)
+    ]
+    outputs = {
+        "pred_logits": logits[-1],
+        "pred_masks": mask_preds[-1].float(),
+        "aux_outputs": [{"pred_logits": c, "pred_masks": m.float()} for c, m in zip(logits[:-1], mask_preds[:-1])],
+    }
+    losses = criterion(outputs, targets)
+    total = sum(losses[k] * weight_dict[k] for k in losses if k in weight_dict)
+    assert torch.isfinite(total), losses
+    total.backward()
+    for mod, names in [(clf, ["region_embed", "proj", "void_embed", "logit_scale"]),
+                       (net, ["mask_decoder.attn_mlp", "mask_decoder.bias_query", "vit_model.blocks.0", "query_embed"])]:
+        for name in names:
+            grads = [p.grad for n, p in mod.named_parameters() if n.startswith(name)]
+            assert grads and all(g is not None and torch.isfinite(g).all() for g in grads), name
+    assert all(p.grad is None for p in core.parameters())
+    print(f"region classifier: ok (loss {total.item():.3f})")
+
+
 @torch.no_grad()
 def seg_features(core, x, t, y, base, img):
     seg = dict(base, image_adapter=img)
@@ -397,4 +487,5 @@ if __name__ == "__main__":
     check_concept_lora()
     check_image_lora_and_mask_head()
     check_side_adapter()
+    check_region_classifier()
     print("all checks passed")

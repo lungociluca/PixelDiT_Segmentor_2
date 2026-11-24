@@ -26,6 +26,7 @@ from .concept_classifier import (
     reduce_synonyms,
 )
 from .criterion import SetCriterion
+from .region_classifier import RegionClassifier, encode_clip_vocabularies
 from .matcher import HungarianMatcher
 from .side_adapter import build_side_adapter_network
 from ..utils.amp import resolve_amp_dtype, resolve_backbone_dtype
@@ -227,6 +228,20 @@ class SAN(nn.Module):
         noise_side_adapter_input: bool = False,
         query_objectness_threshold: float = 0.0,
         query_top_k: int = 0,
+        num_classes: int = 171,
+        region_cls: bool = False,
+        region_layer: int = 5,
+        region_clip_model: str = "ViT-B-16",
+        region_clip_pretrained: str = "openai",
+        region_template_set: str = "vild",
+        region_clean_names: bool = True,
+        region_split_synonyms: bool = True,
+        region_synonym_reduce: str = "max",
+        region_bias_heads: int = 24,
+        region_proj_hidden_dim: int = 1024,
+        region_dropout: float = 0.0,
+        region_init_logit_scale: float = 50.0,
+        region_concept_alpha: float = 0.0,
     ):
         super().__init__()
         self.size_divisibility = 16
@@ -336,9 +351,40 @@ class SAN(nn.Module):
         self.feature_layers = sorted(set(int(k) for k in feature_layers))
         if not self.feature_layers or self.feature_layers[0] < 0:
             raise ValueError(f"MODEL.PIXELDIT.FEATURE_LAYERS must be non-negative, got {feature_layers}")
-        # Blocks built = deepest layer needed by the side adapter or by the concept
-        # classifier. Training only runs the side adapter's layers.
-        local_config.layer_count = max(self.feature_layers[-1], self.concept_depth)
+        # SAN-style region classifier (MODEL.REGION_CLS): region tokens run through
+        # PixelDiT block `region_layer`, reading its input = the output of block
+        # region_layer - 1, which the backbone pass therefore also taps.
+        self.region_cls = region_cls
+        self.region_layer = int(region_layer)
+        self.region_synonym_reduce = region_synonym_reduce
+        self.region_concept_alpha = float(region_concept_alpha)
+        self.region_classifier = None
+        if region_cls:
+            if class_agnostic:
+                raise ValueError(
+                    "MODEL.REGION_CLS.ENABLED trains the classifier with the Mask2Former class "
+                    "loss over the training vocabulary: set MODEL.SAN.CLASS_AGNOSTIC False."
+                )
+            if self.region_layer < 1:
+                raise ValueError(f"MODEL.REGION_CLS.LAYER must be >= 1, got {region_layer}")
+            if concept_lora and not self.concept_joint:
+                raise ValueError(
+                    "MODEL.REGION_CLS.ENABLED trains with the side adapter; MODEL.CONCEPT.LORA."
+                    "TRAIN_MODE 'gt_masks' skips it. Use 'joint' / 'joint_gt' or disable LORA."
+                )
+            if not 0.0 <= region_concept_alpha <= 1.0:
+                raise ValueError(f"MODEL.REGION_CLS.CONCEPT_ALPHA must be in [0, 1], got {region_concept_alpha}")
+            if region_synonym_reduce not in ("max", "mean"):
+                raise ValueError(f"MODEL.REGION_CLS.SYNONYM_REDUCE must be 'max' or 'mean', got {region_synonym_reduce!r}")
+        # Layers the mask-path backbone pass returns: the side adapter's, plus the
+        # region classifier's input.
+        self.tap_layers = sorted(set(self.feature_layers) | ({self.region_layer - 1} if region_cls else set()))
+
+        # Blocks built = deepest layer needed by the side adapter, the concept
+        # classifier or the region classifier.
+        local_config.layer_count = max(
+            self.feature_layers[-1], self.concept_depth, self.region_layer if region_cls else 0
+        )
 
         self.model, self.tokenizer, self.text_encoder = get_model()
         num_blocks = len(self.model.core.patch_blocks)
@@ -346,6 +392,16 @@ class SAN(nn.Module):
             raise ValueError(
                 f"MODEL.PIXELDIT.FEATURE_LAYERS {self.feature_layers} goes deeper than the "
                 f"{num_blocks} PixelDiT patch blocks."
+            )
+        if region_cls and self.region_layer > num_blocks:
+            raise ValueError(
+                f"MODEL.REGION_CLS.LAYER {self.region_layer} goes deeper than the "
+                f"{num_blocks} PixelDiT patch blocks."
+            )
+        if region_cls and region_bias_heads not in (1, self.model.core.num_groups):
+            raise ValueError(
+                f"MODEL.REGION_CLS.BIAS_HEADS must be 1 or the {self.model.core.num_groups} "
+                f"PixelDiT heads, got {region_bias_heads}"
             )
         if concept_enabled and self.concept_depth > num_blocks:
             raise ValueError(
@@ -364,6 +420,26 @@ class SAN(nn.Module):
         self.class_labels = {}   # dataset_name -> List[str]
         for name in dict.fromkeys(list(train_dataset_names) + list(test_dataset_names)):
             self.class_labels[name] = get_dataset_labels(name)
+
+        # Frozen CLIP text embeddings of every vocabulary (region classifier):
+        # dataset_name -> ((N, D) unit-norm embeddings, (N,) class of each variant).
+        self.region_text = {}
+        if region_cls:
+            for name in train_dataset_names:
+                if len(self.class_labels[name]) != num_classes:
+                    raise ValueError(
+                        f"MODEL.SAN.NUM_CLASSES is {num_classes} but '{name}' has "
+                        f"{len(self.class_labels[name])} classes; the criterion needs them equal."
+                    )
+            self.region_text = encode_clip_vocabularies(
+                self.class_labels,
+                model_name=region_clip_model,
+                pretrained=region_clip_pretrained,
+                template_set=region_template_set,
+                clean_names=region_clean_names,
+                split_synonyms=region_split_synonyms,
+                device=local_config.device,
+            )
 
         # One concept vector per class name, per dataset (needs the text encoder,
         # so computed before it is dropped). dataset_name -> (K, txt_embed_dim).
@@ -456,6 +532,15 @@ class SAN(nn.Module):
             side_adapter_cfg,
             {k: ShapeSpec(channels=hidden_size) for k in self.feature_layers},
         )
+        if region_cls:
+            text_dim = next(iter(self.region_text.values()))[0].shape[-1]
+            self.region_classifier = RegionClassifier(
+                hidden_size,
+                text_dim,
+                proj_hidden_dim=region_proj_hidden_dim,
+                init_logit_scale=region_init_logit_scale,
+                dropout=region_dropout,
+            )
 
         if concept_lora:
             # Trainable concept path. With TRAIN_MODE "gt_masks", training optimises
@@ -588,6 +673,20 @@ class SAN(nn.Module):
             "noise_side_adapter_input": cfg.MODEL.PIXELDIT.NOISE_SIDE_ADAPTER_INPUT,
             "query_objectness_threshold": cfg.MODEL.SAN.QUERY_FILTER.OBJECTNESS_THRESHOLD,
             "query_top_k": cfg.MODEL.SAN.QUERY_FILTER.TOP_K,
+            "num_classes": cfg.MODEL.SAN.NUM_CLASSES,
+            "region_cls": cfg.MODEL.REGION_CLS.ENABLED,
+            "region_layer": cfg.MODEL.REGION_CLS.LAYER,
+            "region_clip_model": cfg.MODEL.REGION_CLS.CLIP_MODEL,
+            "region_clip_pretrained": cfg.MODEL.REGION_CLS.CLIP_PRETRAINED,
+            "region_template_set": cfg.MODEL.REGION_CLS.TEMPLATE_SET,
+            "region_clean_names": cfg.MODEL.REGION_CLS.CLEAN_NAMES,
+            "region_split_synonyms": cfg.MODEL.REGION_CLS.SPLIT_SYNONYMS,
+            "region_synonym_reduce": cfg.MODEL.REGION_CLS.SYNONYM_REDUCE,
+            "region_bias_heads": cfg.MODEL.REGION_CLS.BIAS_HEADS,
+            "region_proj_hidden_dim": cfg.MODEL.REGION_CLS.PROJ_HIDDEN_DIM,
+            "region_dropout": cfg.MODEL.REGION_CLS.DROPOUT,
+            "region_init_logit_scale": cfg.MODEL.REGION_CLS.INIT_LOGIT_SCALE,
+            "region_concept_alpha": cfg.MODEL.REGION_CLS.CONCEPT_ALPHA,
         }
     
     def embed_condition(self, prompts, with_chi_window=False):
@@ -815,6 +914,38 @@ class SAN(nn.Module):
             losses["loss_mask_head_cls"] = zero + sum(p.sum() * 0.0 for p in self.mask_head.parameters())
         return losses
 
+    def region_logits(self, segment_data, attn_bias, dataset_name):
+        """SAN-style class logits (B, Q, K + 1) of the mask queries: region tokens
+        run through PixelDiT block REGION_CLS.LAYER on the image tokens the
+        backbone pass fed into it, with the side adapter's attention bias
+        (B, heads, Q, hs, ws), scored against the CLIP text embeddings."""
+        if dataset_name not in self.region_text:
+            raise KeyError(f"No CLIP text embeddings for '{dataset_name}'.")
+        h, w = segment_data["hw"]
+        x = segment_data["features"][self.region_layer - 1].detach()  # (B, h*w, hidden)
+        B, nh, Q = attn_bias.shape[:3]
+        if tuple(attn_bias.shape[-2:]) != (h, w):
+            attn_bias = F.interpolate(
+                attn_bias.flatten(1, 2), size=(h, w), mode="bilinear", align_corners=False
+            ).reshape(B, nh, Q, h, w)
+        attn_bias = attn_bias.flatten(-2)  # (B, heads, Q, h*w)
+        block = self.model.core.patch_blocks[self.region_layer - 1]
+        half_backbone = self.backbone_dtype != torch.float32
+        # The frozen block runs in the backbone dtype, as in _run_backbone, but
+        # with gradients: they reach the region embedding and, through the bias,
+        # the side adapter.
+        with torch.autocast(
+            x.device.type, dtype=self.backbone_dtype if half_backbone else None, enabled=half_backbone
+        ):
+            x = x.to(self.backbone_dtype)
+            r = self.region_classifier.init_tokens(x, Q)
+            cond = segment_data["condition"].to(self.backbone_dtype)
+            r = block.forward_region(x, r, cond, attn_bias)
+        text, variant_class = self.region_text[dataset_name]
+        return self.region_classifier.logits(
+            r, text, variant_class, len(self.class_labels[dataset_name]), self.region_synonym_reduce
+        )
+
     def call_model(self, image_tensor, dataset_name):
         # Autocast here too (not only in the training loop) because evaluation runs
         # without it, and the frozen weights may be in half precision. Inside the
@@ -838,7 +969,7 @@ class SAN(nn.Module):
           "scores": {layer: (B, h*w, C)} image-token / class-concept similarities
           "hw":     (h, w) PixelDiT patch grid
         """
-        segment_data = {"feature_layers": self.feature_layers}
+        segment_data = {"feature_layers": self.tap_layers}
         use_concepts = self.concept_enabled and not self.training
         # Mask path: PixelDiT sees x_t at MODEL.PIXELDIT.TIMESTEP (clean if <= 0).
         t_mask = self.mask_timestep
@@ -873,9 +1004,15 @@ class SAN(nn.Module):
         backbone_features = {
             k: v.detach().float().transpose(1, 2).reshape(v.shape[0], v.shape[-1], h, w)
             for k, v in segment_data["features"].items()
+            if k in self.feature_layers
         }
         side_input = noisy_image if self.noise_side_adapter_input else image_tensor
         mask_preds, mask_logits = self.side_adapter_network(side_input, backbone_features)
+        if self.region_classifier is not None:
+            # The side adapter returned attention biases instead of class logits.
+            mask_logits = [
+                self.region_logits(segment_data, bias, dataset_name) for bias in mask_logits
+            ]
         concept_out = None
         if share_pass:
             concept_out = {
@@ -1000,7 +1137,22 @@ class SAN(nn.Module):
                     # Replace the (object / no object) scores with open-vocabulary
                     # class probabilities from concept attention.
                     cls_probs = concept_cls[i]
-                    if self.concept_weight_by_objectness:
+                    if self.region_classifier is not None:
+                        # Geometric ensemble with the region classifier's class
+                        # probabilities (renormalised without "no object").
+                        region_probs = F.softmax(mask_cls_result.float()[:, :-1], dim=-1)
+                        # ensemble_probs keeps the all-zero rows of its *first*
+                        # argument; here that is region_probs, which has none. The
+                        # concept path marks masks that are empty after BINARIZE_MASKS
+                        # with all-zero rows ("no object"), so zero those explicitly
+                        # whenever the concept path takes part (alpha > 0).
+                        concept_valid = cls_probs.sum(-1, keepdim=True) > 0
+                        cls_probs = ensemble_probs(
+                            region_probs, cls_probs.clamp(min=1e-8).log(), self.region_concept_alpha
+                        )
+                        if self.region_concept_alpha > 0:
+                            cls_probs = cls_probs * concept_valid
+                    if self.concept_weight_by_objectness or self.region_classifier is not None:
                         objectness = F.softmax(mask_cls_result.float(), dim=-1)[:, :-1].sum(-1)
                         cls_probs = cls_probs * objectness[:, None]
                     mask_cls_result = cls_probs

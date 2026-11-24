@@ -1,0 +1,54 @@
+# SAN-style mask classification on PixelDiT with a frozen CLIP text encoder.
+#
+# Masks: side adapter fed PixelDiT blocks 1, 3, 5 (as in the 5-block runs).
+# Classes: one region token per mask query runs through PixelDiT block 5,
+# attending to block 5's input image tokens with a per-query, per-head
+# attention bias from the side adapter (SAN's attention-bias branch). Its block-5
+# output is projected into the CLIP text space and scored against the class
+# names (CLIP ViT-B/16 text encoder, used once at construction, frozen).
+# Trained end-to-end with the Mask2Former criterion on the matched predicted
+# masks: the class loss also trains the bias branch, and through it the side
+# adapter, so no GT masks are used for classification. Blocks built = 5.
+#
+# train:
+#   python train_net.py --config-file configs/san_pixeldit_region_clip.yaml --num-gpus 1 OUTPUT_DIR output_region_clip
+# eval:
+#   ... --eval-only MODEL.WEIGHTS output_region_clip/model_final.pth
+# eval, ensembled with the training-free concept attention of blocks 1-5
+# (no retraining; sweep CONCEPT_ALPHA):
+#   ... MODEL.CONCEPT.ENABLED True MODEL.CONCEPT.LAYERS "[1, 2, 3, 4, 5]" MODEL.REGION_CLS.CONCEPT_ALPHA 0.3
+_BASE_: san_clip_vit_res4_coco.yaml
+MODEL:
+  SAN:
+    CLASS_AGNOSTIC: False          # class loss over the 171 COCO-Stuff names
+    NUM_CLASSES: 171
+    CLASS_WEIGHT: 2.0
+    NO_OBJECT_WEIGHT: 0.1
+    ORACLE_CLASSES:
+      ENABLED: False
+  PIXELDIT:
+    FEATURE_LAYERS: [1, 3, 5]      # side adapter taps (block 4 is tapped too, for the region tokens)
+    TIMESTEP: 0.4
+    NOISE_SEED: 0
+  SIDE_ADAPTER:
+    FUSION_MAP: ["1->0", "3->1", "5->2"]
+  CONCEPT:
+    ENABLED: False
+  REGION_CLS:
+    ENABLED: True
+    LAYER: 5
+    CLIP_MODEL: "ViT-B-16"
+    CLIP_PRETRAINED: "openai"
+    TEMPLATE_SET: "vild"
+    BIAS_HEADS: 24                 # one bias map per PixelDiT head (1 = shared, less memory)
+    BIAS_CHANNELS: 64
+    PROJ_HIDDEN_DIM: 1024
+    INIT_LOGIT_SCALE: 50.0
+SOLVER:
+  # The region attention keeps (B, 24, 100, 4096) logits per deep-supervision
+  # output: smaller micro-batches, same 32 images per optimizer step.
+  IMS_PER_BATCH: 8
+  GRAD_ACCUM_STEPS: 4
+  MAX_ITER: 3000
+TEST:
+  EVAL_PERIOD: 1000
