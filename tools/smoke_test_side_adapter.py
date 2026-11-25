@@ -438,7 +438,7 @@ def check_rec():
     bias = torch.zeros(B, 1, Q, *hw, device=device)
     bias[:, :, :, 3, 2] = 1e4
     blk = core.patch_blocks[2]
-    out, _ = head._block(blk, seg["rec_condition"], seg["rec_inputs"][3],
+    out, _, where = head._block(blk, seg["rec_condition"], seg["rec_inputs"][3],
                          head.init_tokens(seg["rec_inputs"][3], masks, hw),
                          head._bias_to_grid(bias, hw), last=True)
     with torch.no_grad():
@@ -447,6 +447,12 @@ def check_rec():
         v = blk.attn.qkv_x(xn).reshape(B, P, 3, 4, 24)[:, 3 * hw[1] + 2, 2].reshape(B, 96)
         ref = blk.attn.proj_x(v)
     assert torch.allclose(out, ref[:, None].expand_as(out), atol=1e-4), (out - ref[:, None]).abs().max()
+    assert torch.allclose(where[..., 3 * hw[1] + 2], torch.ones_like(where[..., 0]), atol=1e-4)
+    # SCORE "pooled" with that one-hot attention = that patch's class probabilities.
+    pooled_head = AttnBiasMaskRecognizer([3], query_init="global", self_attn=False, mask_prior=False).to(device)
+    rec_pool = pooled_head(core.patch_blocks, seg, [bias], masks)
+    pix = seg["concept_scores"][3][:, 3 * hw[1] + 2].float().softmax(-1)  # (B, N)
+    assert torch.allclose(rec_pool, pix.log()[:, None].expand_as(rec_pool), atol=1e-4)
 
     # Side adapter with the bias branch, and the class loss back to it.
     cfg = get_cfg()
@@ -463,13 +469,27 @@ def check_rec():
     mask_preds, logits, biases = net(image, feats)
     assert all(b is None for b in biases[:-1]), "deep-supervision outputs carry no bias"
     assert len(biases[-1]) == 2 and all(b.shape == (B, 4, Q, *hw) for b in biases[-1])
-    head = AttnBiasMaskRecognizer([2, 3], query_init="masked").to(device).train()
+    target = torch.randint(0, K, (B * Q,), device=device)
+    # Default (mask prior, bias gain 0): logits do not depend on the learned bias
+    # yet, only the gain gets a gradient; a GT-style call without biases works.
+    head0 = AttnBiasMaskRecognizer([2, 3], query_init="masked", score="token").to(device).train()
+    rec0 = head0(core.patch_blocks, seg, biases[-1], mask_preds[-1])
+    assert torch.allclose(rec0, head0(core.patch_blocks, seg, None, mask_preds[-1]), atol=1e-5)
+    torch.nn.functional.cross_entropy(rec0.flatten(0, 1), target).backward(retain_graph=True)
+    assert head0.bias_gain.grad is not None and head0.bias_gain.grad.abs() > 0
+    assert rec0.std(-1).mean() > 0.5, "zscore logits should not be flat at init"
+    net.zero_grad()
+    # Without the prior (gain 1) the class loss reaches the bias branch directly.
+    head = AttnBiasMaskRecognizer(
+        [2, 3], query_init="masked", mask_prior=False, score_layers=[2, 3]
+    ).to(device).train()
     rec = head(core.patch_blocks, seg, biases[-1], mask_preds[-1])
     assert rec.shape == (B, Q, K) and torch.isfinite(rec).all(), rec.shape
-    torch.nn.functional.cross_entropy(rec.flatten(0, 1), torch.randint(0, K, (B * Q,), device=device)).backward()
+    torch.nn.functional.cross_entropy(rec.flatten(0, 1), target).backward()
     for name in ["mask_decoder.attn_mlp", "mask_decoder.query_mlp", "vit_model.blocks.0"]:
         grads = [p.grad for n, p in net.named_parameters() if n.startswith(name)]
         assert grads and all(g is not None and torch.isfinite(g).all() for g in grads), name
+        assert any(g.abs().sum() > 0 for g in grads), name
     assert head.logit_scale.grad is not None
     # QUERY_INIT "masked" uses detached masks: no class gradient through pix_mlp.
     assert all(p.grad is None or p.grad.abs().sum() == 0

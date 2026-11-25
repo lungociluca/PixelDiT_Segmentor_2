@@ -246,7 +246,34 @@ def add_san_config(cfg):
     cfg.MODEL.REC.QUERY_INIT = "global"
     # Mask tokens also attend to themselves (as SAN's [SOS] tokens).
     cfg.MODEL.REC.SELF_ATTN = True
-    cfg.MODEL.REC.INIT_LOGIT_SCALE = 20.0
+    # Class score of a mask token: "zscore" - dot product with each class concept
+    # (as ConceptAttention), standardised over the vocabulary per mask; "dot" -
+    # dot product / sqrt(hidden); "cosine" - cosine similarity (nearly flat over
+    # the classes in this space: needs a large INIT_LOGIT_SCALE, e.g. 50-100).
+    cfg.MODEL.REC.SIMILARITY = "zscore"
+    # Learned scale of those scores (initial value).
+    cfg.MODEL.REC.INIT_LOGIT_SCALE = 3.0
+    # Add log sigmoid(mask logit) of the query's own (detached) mask to the
+    # attention bias, and start the learned bias at gain 0: training starts from
+    # attention restricted to the predicted mask and the bias refines it.
+    cfg.MODEL.REC.MASK_PRIOR = True
+    # Diagnostic, inference only: classify the GT segments with MODEL.REC (mask
+    # prior, no learned bias, side adapter not run). Per-segment top-1 is logged;
+    # it is the ceiling of the frozen recognition block before the bias helps.
+    cfg.MODEL.REC.GT_MASKS = False
+    # Class score of a mask. "pooled": the mask token's attention over the patches
+    # (in the last LAYERS block, heads averaged) pools ConceptAttention's per-patch
+    # class probabilities (softmax over classes of the image / concept attention
+    # outputs at every patch, / PIXEL_TEMPERATURE, averaged over SCORE_LAYERS);
+    # logits = INIT_LOGIT_SCALE-initialised scale x log of the pooled probabilities.
+    # With the mask prior and bias gain 0 this starts as the training-free
+    # concept-attention classifier. "token": the mask token's own attention output
+    # against the concepts (SIMILARITY).
+    cfg.MODEL.REC.SCORE = "pooled"
+    # Blocks whose per-patch scores are averaged ([] = last of LAYERS). E.g.
+    # [1, 2, 3, 4] as MODEL.CONCEPT.LAYERS.
+    cfg.MODEL.REC.SCORE_LAYERS = []
+    cfg.MODEL.REC.PIXEL_TEMPERATURE = 1.0
     cfg.MODEL.REC.LABEL_SMOOTHING = 0.0
     cfg.MODEL.REC.LOSS_WEIGHT = 2.0
     # Flow time of the input PixelDiT sees for recognition. < 0: share the side

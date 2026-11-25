@@ -22,6 +22,9 @@
 # eval:
 #   python train_net.py --config-file configs/san_pixeldit_rec_attn_bias.yaml --num-gpus 1 \
 #     --eval-only MODEL.WEIGHTS output_rec/model_final.pth OUTPUT_DIR output_rec_eval
+# check the frozen recognition block on GT segments first (no training needed;
+# with a trained mask path the mIoU is also meaningful):
+#   ... --eval-only MODEL.WEIGHTS output_5blocks_joint_135/model_final.pth MODEL.REC.GT_MASKS True
 # ablations (no code change):
 #   MODEL.REC.TIMESTEP 0.4            recognition on a 40%-noise pass (as the concept runs)
 #   MODEL.REC.QUERY_INIT masked       mask tokens start from the mask-pooled image tokens
@@ -64,18 +67,23 @@ MODEL:
   REC:
     ENABLED: True
     LAYERS: [5]
-    QUERY_INIT: "global"
+    QUERY_INIT: "masked"           # start from the mask-pooled image tokens
     SELF_ATTN: True
-    INIT_LOGIT_SCALE: 20.0
+    SCORE: "pooled"                # bias-steered pooling of per-patch concept-attention probabilities
+    SCORE_LAYERS: [1, 2, 3, 4, 5]  # per-patch scores averaged over these blocks
+    PIXEL_TEMPERATURE: 1.0
+    SIMILARITY: "zscore"           # SCORE "token" only
+    INIT_LOGIT_SCALE: 1.0          # x log(pooled probability)
+    MASK_PRIOR: True               # start from attention inside the predicted mask (bias gain 0)
     LABEL_SMOOTHING: 0.0
     LOSS_WEIGHT: 2.0
-    TIMESTEP: -1.0                 # share the side adapter's pass
+    TIMESTEP: 0.4                  # own no-grad pass at 40% noise, as the concept classifier
     WEIGHT_BY_OBJECTNESS: True
 SOLVER:
   # The bias branch and the (B, 24, 100, 4096) recognition attention add memory:
   # smaller micro-batches, same 32 images per optimizer step as 16 x 2.
   IMS_PER_BATCH: 8
   GRAD_ACCUM_STEPS: 4
-  MAX_ITER: 500
+  MAX_ITER: 3000
 TEST:
   EVAL_PERIOD: 1000

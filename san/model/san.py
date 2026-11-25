@@ -248,6 +248,12 @@ class SAN(nn.Module):
         rec_weight_by_objectness: bool = True,
         rec_holdout_classes: Optional[List[str]] = None,
         text_cache_path: str = "",
+        rec_similarity: str = "zscore",
+        rec_mask_prior: bool = True,
+        rec_gt_masks: bool = False,
+        rec_score: str = "pooled",
+        rec_score_layers: Optional[List[int]] = None,
+        rec_pixel_temperature: float = 1.0,
     ):
         super().__init__()
         self.size_divisibility = 16
@@ -362,6 +368,15 @@ class SAN(nn.Module):
         self.rec_timestep = float(rec_timestep)
         self.rec_noise_seed = int(rec_noise_seed)
         self.rec_weight_by_objectness = bool(rec_weight_by_objectness)
+        if rec_gt_masks and not rec_enabled:
+            raise ValueError("MODEL.REC.GT_MASKS needs MODEL.REC.ENABLED.")
+        self.rec_gt_masks = bool(rec_gt_masks)
+        # Blocks whose per-patch concept scores MODEL.REC.SCORE "pooled" averages.
+        self.rec_score_layers = (
+            sorted(set(int(k) for k in (rec_score_layers or []))) or self.rec_layers[-1:]
+        )
+        if rec_enabled and self.rec_score_layers[0] < 1:
+            raise ValueError(f"MODEL.REC.SCORE_LAYERS must be blocks >= 1, got {rec_score_layers}")
         self.rec_head = None
 
         self.class_agnostic = class_agnostic
@@ -381,6 +396,7 @@ class SAN(nn.Module):
         # classifier. Training only runs the side adapter's layers.
         local_config.layer_count = max(
             [self.feature_layers[-1], self.concept_depth] + self.rec_layers
+            + (self.rec_score_layers if rec_enabled else [])
         )
 
         self.model, self.tokenizer, self.text_encoder = get_model(with_text_encoder=not text_cache_path)
@@ -552,10 +568,17 @@ class SAN(nn.Module):
                 query_init=rec_query_init,
                 self_attn=rec_self_attn,
                 init_logit_scale=rec_init_logit_scale,
+                similarity=rec_similarity,
+                mask_prior=rec_mask_prior,
+                score=rec_score,
+                score_layers=self.rec_score_layers,
+                pixel_temperature=rec_pixel_temperature,
             )
             get_root_logger().info(
                 f"MODEL.REC: mask tokens through PixelDiT blocks {self.rec_layers}, "
                 f"{sa.ATTN_BIAS.NUM_HEADS} bias map(s) per query, query init {rec_query_init!r}, "
+                f"score {rec_score!r} (layers {self.rec_score_layers}), "
+                f"similarity {rec_similarity!r}, mask prior {rec_mask_prior}, "
                 + ("shared backbone pass" if self.rec_timestep < 0 else f"own pass at t={self.rec_timestep}")
             )
 
@@ -702,6 +725,12 @@ class SAN(nn.Module):
             "rec_weight_by_objectness": cfg.MODEL.REC.WEIGHT_BY_OBJECTNESS,
             "rec_holdout_classes": list(cfg.MODEL.REC.HOLDOUT_CLASSES),
             "text_cache_path": cfg.MODEL.TEXT_CACHE.PATH,
+            "rec_similarity": cfg.MODEL.REC.SIMILARITY,
+            "rec_mask_prior": cfg.MODEL.REC.MASK_PRIOR,
+            "rec_gt_masks": cfg.MODEL.REC.GT_MASKS,
+            "rec_score": cfg.MODEL.REC.SCORE,
+            "rec_score_layers": list(cfg.MODEL.REC.SCORE_LAYERS),
+            "rec_pixel_temperature": cfg.MODEL.REC.PIXEL_TEMPERATURE,
         }
     
     def embed_condition(self, prompts, with_chi_window=False):
@@ -948,15 +977,16 @@ class SAN(nn.Module):
         concepts = self.concept_embs[dataset_name]
         return {
             "concepts": concepts if sel is None else concepts[sel],
-            "concept_layers": self.rec_layers,
+            # Concept tokens run to the deepest recognition / score block; the
+            # per-patch scores of the score blocks are kept for SCORE "pooled".
+            "concept_layers": sorted(set(self.rec_layers) | set(self.rec_score_layers)),
             "concept_position": self.concept_position,
             "rec_layers": self.rec_layers,
         }
 
     def _rec_logits(self, rec_state, attn_biases, mask_preds, dataset_name, keep=None):
-        """(B, Q, K) class logits of the predicted masks (synonyms reduced)."""
-        if attn_biases is None:
-            raise RuntimeError("MODEL.REC needs the side adapter's attention biases.")
+        """(B, Q, K) class logits of the masks (synonyms reduced). attn_biases
+        None: no learned bias (GT-mask diagnostic)."""
         logits = self.rec_head(self.model.core.patch_blocks, rec_state, attn_biases, mask_preds)
         _, variant_class, num_classes = self._concept_variants(dataset_name, keep)
         return reduce_synonyms(logits, variant_class, num_classes, self.concept_synonym_reduce)
@@ -983,8 +1013,15 @@ class SAN(nn.Module):
             from detectron2.utils.events import get_event_storage
 
             storage = get_event_storage()
-            storage.put_scalar("rec_cls_acc", (logits.argmax(-1) == targets).float().mean().item())
-            storage.put_scalar("rec_logit_scale", self.rec_head.logit_scale.exp().item())
+            with torch.no_grad():
+                pred = logits.argmax(-1)
+                storage.put_scalar("rec_cls_acc", (pred == targets).float().mean().item())
+                storage.put_scalar("rec_logit_scale", self.rec_head.logit_scale.exp().item())
+                storage.put_scalar("rec_bias_gain", self.rec_head.bias_gain.item())
+                # Spread of the logits over the classes: ~0 means a flat classifier.
+                storage.put_scalar("rec_logit_std", logits.std(-1).mean().item())
+                # Share of the most predicted class: ~1 means collapse to one class.
+                storage.put_scalar("rec_top_class_share", pred.bincount().max().item() / pred.numel())
         except AssertionError:
             pass  # no event storage outside a trainer
         return {"loss_rec_cls": self.rec_loss_weight * loss}
@@ -1086,6 +1123,8 @@ class SAN(nn.Module):
         dataset_name = self._dataset_name(batched_inputs)
         if self.concept_gt_masks and not self.training:
             return self.gt_mask_inference(batched_inputs, images, dataset_name)
+        if self.rec_gt_masks and not self.training:
+            return self.rec_gt_mask_inference(batched_inputs, images, dataset_name)
         if self.concept_lora and self.training and not self.concept_joint:
             return self.concept_train_forward(batched_inputs, images, dataset_name)
         mask_logits, mask_preds, concept_out, rec_logits = self.call_model(images_tensor, dataset_name)
@@ -1351,6 +1390,61 @@ class SAN(nn.Module):
                 if stats[1] // 500 != (stats[1] - gt_classes.numel()) // 500:
                     get_root_logger().info(
                         f"[{dataset_name}] GT-mask classification top-1: "
+                        f"{100.0 * stats[0] / stats[1]:.2f}% of {stats[1]} segments"
+                    )
+            processed_results.append(
+                {"sem_seg": retry_if_cuda_oom(sem_seg_postprocess)(sem_seg, image_size, height, width)}
+            )
+        return processed_results
+
+    @torch.no_grad()
+    def rec_gt_mask_inference(self, batched_inputs, images, dataset_name):
+        """Diagnostic (MODEL.REC.GT_MASKS): classify the ground-truth segments
+        with MODEL.REC, without the side adapter: one mask token per GT class
+        present in the image, mask prior from the segment, no learned bias. It
+        measures what the recognition block can do with perfect masks before /
+        without the bias. Per-segment top-1 is logged like CONCEPT.GT_MASKS."""
+        shared = self.rec_timestep < 0
+        t = self.mask_timestep if shared else self.rec_timestep
+        seed = self.mask_noise_seed if shared else self.rec_noise_seed
+        x = self._noise_image(images.tensor, t, seed, False)
+        state = {"feature_layers": [], **self._rec_inputs(dataset_name)}
+        with torch.autocast(
+            "cuda", dtype=self.amp_dtype or torch.float32, enabled=self.amp_dtype is not None
+        ):
+            self._run_backbone(x, state, timestep=t if t > 0 else None)
+        h, w = state["hw"]
+        H_pad, W_pad = images.tensor.shape[-2:]
+        num_classes = len(self.class_labels[dataset_name])
+        ignore_label = self._ignore_label(dataset_name)
+        stats = self.concept_gt_stats.setdefault(dataset_name, [0, 0])
+        processed_results = []
+        for i, (input_per_image, image_size) in enumerate(zip(batched_inputs, images.image_sizes)):
+            height = input_per_image.get("height", image_size[0])
+            width = input_per_image.get("width", image_size[1])
+            gt = self._gt_sem_seg(input_per_image, image_size)
+            valid = (gt != ignore_label) & (gt >= 0) & (gt < num_classes)
+            gt_classes = torch.unique(gt[valid])
+            sem_seg = torch.zeros(num_classes, *gt.shape, device=gt.device, dtype=torch.float32)
+            if gt_classes.numel() > 0:
+                masks = (gt[None] == gt_classes[:, None, None]).float()  # (S, H, W)
+                padded = F.pad(masks, (0, W_pad - gt.shape[1], 0, H_pad - gt.shape[0]))
+                frac = F.adaptive_avg_pool2d(padded[None], (h, w))[0]   # (S, h, w)
+                mask_logits = torch.logit(frac.clamp(1e-4, 1 - 1e-4))[None]  # (1, S, h, w)
+                sub = {
+                    "hw": (h, w),
+                    "rec_inputs": {k: v[i : i + 1] for k, v in state["rec_inputs"].items()},
+                    "rec_concepts": {k: v[i : i + 1] for k, v in state["rec_concepts"].items()},
+                    "rec_condition": state["rec_condition"][i : i + 1],
+                    "concept_scores": {k: v[i : i + 1] for k, v in state["concept_scores"].items()},
+                }
+                probs = self._rec_logits(sub, None, mask_logits, dataset_name)[0].softmax(-1)
+                sem_seg = torch.einsum("sc,shw->chw", probs, masks)
+                stats[0] += int((probs.argmax(-1) == gt_classes).sum())
+                stats[1] += int(gt_classes.numel())
+                if stats[1] // 500 != (stats[1] - gt_classes.numel()) // 500:
+                    get_root_logger().info(
+                        f"[{dataset_name}] REC GT-mask classification top-1: "
                         f"{100.0 * stats[0] / stats[1]:.2f}% of {stats[1]} segments"
                     )
             processed_results.append(
