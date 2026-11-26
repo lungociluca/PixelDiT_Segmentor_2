@@ -218,6 +218,7 @@ class SAN(nn.Module):
         mask_head_loss_weight: float = 1.0,
         mask_head_ensemble_alpha: float = 0.5,
         mask_head_only: bool = False,
+        shared_pass: bool = False,
         image_lora: bool = False,
         image_lora_rank: int = 16,
         image_lora_alpha: float = 16.0,
@@ -252,6 +253,15 @@ class SAN(nn.Module):
             if concept_pixel_baseline:
                 raise ValueError("MODEL.CONCEPT.PIXEL_BASELINE needs the concept classifier (MASK_HEAD.ONLY False).")
             concept_layers = []
+        # SHARED_PASS: one PixelDiT pass at CONCEPT.TIMESTEP feeds both the side
+        # adapter and the mask head.
+        if shared_pass and not mask_head_only:
+            raise ValueError("MODEL.CONCEPT.SHARED_PASS needs MODEL.CONCEPT.MASK_HEAD.ONLY.")
+        if shared_pass and image_lora:
+            raise ValueError(
+                "MODEL.CONCEPT.SHARED_PASS: IMAGE_LORA would change the side adapter's features too; disable it."
+            )
+        self.shared_pass = shared_pass
         self.concept_layers = sorted(set(int(k) for k in (concept_layers or [])))
         self.concept_weight_by_objectness = concept_weight_by_objectness
         self.concept_pixel_baseline = concept_pixel_baseline
@@ -577,6 +587,7 @@ class SAN(nn.Module):
             "mask_head_loss_weight": cfg.MODEL.CONCEPT.MASK_HEAD.LOSS_WEIGHT,
             "mask_head_ensemble_alpha": cfg.MODEL.CONCEPT.MASK_HEAD.ENSEMBLE_ALPHA,
             "mask_head_only": cfg.MODEL.CONCEPT.MASK_HEAD.ONLY,
+            "shared_pass": cfg.MODEL.CONCEPT.SHARED_PASS,
             "image_lora": cfg.MODEL.CONCEPT.IMAGE_LORA.ENABLED,
             "image_lora_rank": cfg.MODEL.CONCEPT.IMAGE_LORA.RANK,
             "image_lora_alpha": cfg.MODEL.CONCEPT.IMAGE_LORA.ALPHA,
@@ -668,6 +679,21 @@ class SAN(nn.Module):
             "concept_cosine": self.concept_cosine,
         }
 
+    def _noised(self, image_tensor, train):
+        """The image noised to MODEL.CONCEPT.TIMESTEP: (1 - t) * image + t * noise.
+        Fresh noise in training, the fixed NOISE_SEED noise otherwise (reproducible
+        evaluation). t <= 0: the image itself."""
+        t = self.concept_timestep
+        if t <= 0:
+            return image_tensor
+        g = None
+        if not train:
+            g = torch.Generator(device=image_tensor.device).manual_seed(self.concept_noise_seed)
+        noise = torch.randn(
+            image_tensor.shape, generator=g, device=image_tensor.device, dtype=image_tensor.dtype
+        )
+        return (1.0 - t) * image_tensor + t * noise
+
     def concept_pass(self, image_tensor, dataset_name, train=False, keep=None):
         """Backbone pass that only scores the class concepts, on the image noised
         to MODEL.CONCEPT.TIMESTEP: x_t = (1 - t) * image + t * noise (the flow the
@@ -677,15 +703,7 @@ class SAN(nn.Module):
                flow into the concept adapter.
         keep:  indices of the classes to use (default: the whole vocabulary)."""
         t = self.concept_timestep
-        x = image_tensor
-        if t > 0:
-            g = None
-            if not train:
-                g = torch.Generator(device=image_tensor.device).manual_seed(self.concept_noise_seed)
-            noise = torch.randn(
-                image_tensor.shape, generator=g, device=image_tensor.device, dtype=image_tensor.dtype
-            )
-            x = (1.0 - t) * image_tensor + t * noise
+        x = self._noised(image_tensor, train)
         segment_data = {"feature_layers": list(self.mask_head_layers)}
         if self.mask_head_only:
             if dataset_name not in self.concept_embs:
@@ -852,6 +870,8 @@ class SAN(nn.Module):
           "scores": {layer: (B, h*w, C)} image-token / class-concept similarities
           "hw":     (h, w) PixelDiT patch grid
         """
+        if self.shared_pass:
+            return self._call_model_shared(image_tensor, dataset_name)
         segment_data = {"feature_layers": self.feature_layers}
         use_concepts = self.concept_enabled and not self.training
         # Concepts share this (clean image) pass only when no noise is requested;
@@ -890,6 +910,40 @@ class SAN(nn.Module):
             }
         elif use_concepts:
             concept_out = self.concept_pass(image_tensor, dataset_name)
+        return mask_logits, mask_preds, concept_out
+
+    def _call_model_shared(self, image_tensor, dataset_name):
+        """_call_model with MODEL.CONCEPT.SHARED_PASS: a single PixelDiT pass on the
+        image noised to CONCEPT.TIMESTEP gives the side adapter its FEATURE_LAYERS
+        and the mask head its MASK_HEAD.LAYERS, so masks and classes see the same
+        noise level. The side ViT still gets the clean image as its own input.
+        concept_out is returned in training too (for the joint classification loss)."""
+        t = self.concept_timestep
+        taps = sorted(set(self.feature_layers) | set(self.mask_head_layers))
+        segment_data = {"feature_layers": taps}
+        self._run_backbone(
+            self._noised(image_tensor, self.training), segment_data, timestep=t if t > 0 else None
+        )
+        feats = segment_data["features"]
+        for k, v in feats.items():
+            if not torch.isfinite(v).all():
+                raise FloatingPointError(
+                    f"PixelDiT layer {k} features contain inf/NaN with the backbone in "
+                    f"{self.backbone_dtype}. Set MODEL.PIXELDIT.PRECISION to 'auto' or 'float32'."
+                )
+        h, w = segment_data["hw"]
+        backbone_features = {
+            k: feats[k].detach().float().transpose(1, 2).reshape(feats[k].shape[0], feats[k].shape[-1], h, w)
+            for k in self.feature_layers
+        }
+        mask_preds, mask_logits = self.side_adapter_network(image_tensor, backbone_features)
+        keep = self.concept_train_vocab.get(dataset_name, (None, None))[0] if self.training else None
+        concept_out = {
+            "scores": None,
+            "hw": (h, w),
+            "features": {k: feats[k] for k in self.mask_head_layers},
+            "keep": keep,
+        }
         return mask_logits, mask_preds, concept_out
 
     def forward(self, batched_inputs):
@@ -941,7 +995,8 @@ class SAN(nn.Module):
                     losses.pop(k)
             if self.concept_joint and targets is not None:
                 cls_losses = self.concept_joint_loss(
-                    images_tensor, mask_preds[-1], gt_instances, self.criterion.last_indices, dataset_name
+                    images_tensor, mask_preds[-1], gt_instances, self.criterion.last_indices, dataset_name,
+                    concept_out=concept_out if self.shared_pass else None,
                 )
                 for k, v in cls_losses.items():
                     losses[k] = self.concept_loss_weight * v
@@ -1070,19 +1125,22 @@ class SAN(nn.Module):
                 out.append(ensemble_probs(concept_cls[i], hl, self.mask_head_alpha))
         return torch.stack(out)
 
-    def concept_joint_loss(self, images_tensor, mask_preds, gt_instances, indices, dataset_name):
+    def concept_joint_loss(self, images_tensor, mask_preds, gt_instances, indices, dataset_name, concept_out=None):
         """Cross-entropy of the concept classifier on the predicted masks that the
         Hungarian matcher assigned to ground-truth segments (TRAIN_MODE "joint").
 
         mask_preds: (B, Q, hm, wm) mask logits of the last side-adapter output.
         indices:    per image, (query indices, GT segment indices) from the matcher.
+        concept_out: the output of the shared backbone pass (SHARED_PASS); None runs
+                     a separate concept pass.
         Returns the loss dict of _classification_loss (+ the mask head's loss).
         """
         keep, remap = self.concept_train_vocab.get(dataset_name, (None, None))
-        with torch.autocast(
-            "cuda", dtype=self.amp_dtype or torch.float32, enabled=self.amp_dtype is not None
-        ):
-            concept_out = self.concept_pass(images_tensor, dataset_name, train=True, keep=keep)
+        if concept_out is None:
+            with torch.autocast(
+                "cuda", dtype=self.amp_dtype or torch.float32, enabled=self.amp_dtype is not None
+            ):
+                concept_out = self.concept_pass(images_tensor, dataset_name, train=True, keep=keep)
         h, w = concept_out["hw"]
         with torch.autocast(images_tensor.device.type, enabled=False):
             pixel_logits = None

@@ -201,6 +201,12 @@ def add_san_config(cfg):
     # (class-name embeddings), LORA.TRAIN_MODE / LOSS_WEIGHT / DETACH_MASKS /
     # LABEL_SMOOTHING / HOLDOUT_CLASSES, and IMAGE_LORA.
     cfg.MODEL.CONCEPT.MASK_HEAD.ONLY = False
+    # One PixelDiT pass for masks and classes (needs MASK_HEAD.ONLY, no IMAGE_LORA):
+    # the image noised to CONCEPT.TIMESTEP feeds the side adapter (FEATURE_LAYERS)
+    # and the mask head (MASK_HEAD.LAYERS). False: the side adapter reads a pass on
+    # the clean image and the mask head a second pass at CONCEPT.TIMESTEP. The side
+    # ViT's own image input stays clean either way.
+    cfg.MODEL.CONCEPT.SHARED_PASS = False
     # Low-rank adapters on the image stream (qkv_x / proj_x of every block the
     # concept pass runs), in the concept-scoring pass only: the side adapter's
     # clean-image pass keeps the frozen features. Gradients then flow through

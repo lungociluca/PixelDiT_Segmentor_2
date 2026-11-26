@@ -39,6 +39,6 @@ MODEL:
       TRAIN_MODE: "gt_masks"       # classifier only; side adapter frozen, not run
     MASK_HEAD:
       ENABLED: True
-      LAYERS: [3, 4, 5]
+      LAYERS: [5]
     IMAGE_LORA:
       ENABLED: False               # keep the image stream frozen

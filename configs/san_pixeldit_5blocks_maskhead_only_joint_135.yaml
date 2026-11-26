@@ -1,0 +1,32 @@
+# Joint training of masks and classes, mask-head-only classifier, 5-block PixelDiT,
+# one shared PixelDiT pass at a single noise level.
+#
+# Masks: the side adapter is fed PixelDiT blocks 1, 3, 5 (as in
+# san_pixeldit_5blocks_joint_135.yaml) and trained with the mask / dice / objectness
+# losses. Classes: the mask head on the image tokens of blocks 3-5, trained on the
+# predicted masks the Hungarian matcher assigns to ground-truth segments.
+# SHARED_PASS: both read the same PixelDiT pass, on the image noised to
+# CONCEPT.TIMESTEP (x_t = (1 - t) * image + t * noise); the side ViT's own image
+# input stays clean. Fresh noise per step in training, fixed NOISE_SEED noise at eval.
+#
+# train:
+#   python train_net.py --config-file configs/san_pixeldit_5blocks_maskhead_only_joint_135.yaml --num-gpus 1 OUTPUT_DIR output_5blocks_maskhead_only_joint_135
+# eval (predicted masks):
+#   python train_net.py --config-file configs/san_pixeldit_5blocks_maskhead_only_joint_135.yaml --num-gpus 1 \
+#     --eval-only MODEL.WEIGHTS output_5blocks_maskhead_only_joint_135/model_final.pth OUTPUT_DIR output_5blocks_maskhead_only_joint_135_eval
+# eval the classifier on GT masks: add MODEL.CONCEPT.GT_MASKS True (same noise level)
+# other noise levels: MODEL.CONCEPT.TIMESTEP 0.0 = clean image for both
+_BASE_: san_pixeldit_5blocks_maskhead_only.yaml
+MODEL:
+  PIXELDIT:
+    FEATURE_LAYERS: [1, 3, 5]
+  SIDE_ADAPTER:
+    FUSION_MAP: ["1->0", "3->1", "5->2"]
+  CONCEPT:
+    GT_MASKS: False
+    TIMESTEP: 0.4            # noise level of the shared pass, for masks and classes
+    SHARED_PASS: True
+    LORA:                    # training options of the classifier (no LoRA is built)
+      TRAIN_MODE: "joint"
+      LOSS_WEIGHT: 2.0       # weight of the mask-head classification loss
+      DETACH_MASKS: True     # classification loss does not backprop into the side adapter

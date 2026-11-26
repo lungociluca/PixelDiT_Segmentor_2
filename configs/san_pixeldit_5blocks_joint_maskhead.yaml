@@ -1,0 +1,27 @@
+# Joint training of the side adapter (masks + objectness) and the mask head
+# (classification), without concept attention: no concept tokens, no concept
+# LoRA, no concept scores. The mask head pools the PixelDiT block-5 image tokens
+# of a separate pass on the noised image (TIMESTEP 0.4) over every predicted mask
+# the Hungarian matcher assigns to a GT segment; cross-entropy against its class
+# (weight LORA.LOSS_WEIGHT * MASK_HEAD.LOSS_WEIGHT; not back-propagated into the
+# masks, LORA.DETACH_MASKS).
+_BASE_: san_pixeldit_5blocks_joint_135.yaml
+MODEL:
+  PIXELDIT:
+    FEATURE_LAYERS: [1, 3, 5]
+  CONCEPT:
+    ENABLED: True               # needed for the class-name text embeddings
+    CONCEPT_ATTENTION: False
+    GT_MASKS: False
+    TIMESTEP: 0.4
+    LORA:
+      ENABLED: False            # no concept LoRA
+      TRAIN_MODE: "joint"
+      LOSS_WEIGHT: 2.0
+      DETACH_MASKS: True
+    MASK_HEAD:
+      ENABLED: True
+      LAYERS: [5]
+      ENSEMBLE_ALPHA: 1.0       # unused without concept attention
+    IMAGE_LORA:
+      ENABLED: False

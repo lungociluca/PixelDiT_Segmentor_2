@@ -1,0 +1,26 @@
+# Mask classification with the mask-embedding head alone, on a 5-block PixelDiT
+# (san_pixeldit_5blocks_cls.yaml without the concept classifier).
+#
+# Nothing from concept attention: no concept tokens in the PixelDiT pass, no
+# concept LoRA, no learned concept layer weights / logit scale, no concept loss.
+# The class names still enter through their frozen text-encoder embeddings (the
+# mask head's text side). The mask head reads the image tokens of blocks 3-5 of
+# a pass on the image noised to CONCEPT.TIMESTEP; blocks built = max(FEATURE_LAYERS,
+# MASK_HEAD.LAYERS) = 5. Trained on ground-truth segments (TRAIN_MODE gt_masks);
+# the side adapter is frozen and not run.
+#
+# train:
+#   python train_net.py --config-file configs/san_pixeldit_5blocks_maskhead_only.yaml --num-gpus 1 OUTPUT_DIR output_5blocks_maskhead_only
+# eval on GT masks:
+#   python train_net.py --config-file configs/san_pixeldit_5blocks_maskhead_only.yaml --num-gpus 1 \
+#     --eval-only MODEL.WEIGHTS output_5blocks_maskhead_only/model_final.pth OUTPUT_DIR output_5blocks_maskhead_only_eval
+# A san_pixeldit_5blocks_cls.yaml checkpoint also loads here (its concept_adapter.* /
+# concept_classifier.* weights are reported unused) and should reproduce its
+# MASK_HEAD.ENSEMBLE_ALPHA 1.0 result.
+_BASE_: san_pixeldit_5blocks_cls.yaml
+MODEL:
+  CONCEPT:
+    LORA:
+      ENABLED: False
+    MASK_HEAD:
+      ONLY: True
