@@ -194,6 +194,13 @@ def add_san_config(cfg):
     cfg.MODEL.CONCEPT.MASK_HEAD.LOSS_WEIGHT = 1.0
     # 0 = concept classifier only, 1 = mask head only.
     cfg.MODEL.CONCEPT.MASK_HEAD.ENSEMBLE_ALPHA = 0.5
+    # Classify with the mask head alone: no concept tokens in the backbone pass, no
+    # concept LoRA (set LORA.ENABLED False), no concept classifier weights, no
+    # concept loss. CONCEPT.LAYERS and ENSEMBLE_ALPHA are ignored. Still used:
+    # CONCEPT.ENABLED / GT_MASKS / TIMESTEP / NOISE_SEED / the text-side options
+    # (class-name embeddings), LORA.TRAIN_MODE / LOSS_WEIGHT / DETACH_MASKS /
+    # LABEL_SMOOTHING / HOLDOUT_CLASSES, and IMAGE_LORA.
+    cfg.MODEL.CONCEPT.MASK_HEAD.ONLY = False
     # Low-rank adapters on the image stream (qkv_x / proj_x of every block the
     # concept pass runs), in the concept-scoring pass only: the side adapter's
     # clean-image pass keeps the frozen features. Gradients then flow through
